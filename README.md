@@ -4,7 +4,7 @@
 
 *Replace blind line-diffs and context-draining file rewrites with deterministic, content-hashed syntax operations and atomic time-travel.*
 
-[![Tests](https://img.shields.io/badge/tests-975%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-616%20passed-brightgreen.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)]()
 [![Protocol](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-orange.svg)]()
 [![Release](https://img.shields.io/badge/release-v0.2-purple.svg)]()
@@ -51,7 +51,7 @@ Traditional AI coding assistants interact with codebases like text editors from 
 ### 1. Installation
 
 ```bash
-git clone https://github.com/your-org/scalpel-mcp.git
+git clone https://github.com/improveTheWorld/scalpel-mcp.git
 cd scalpel-mcp
 pip install -e .
 ```
