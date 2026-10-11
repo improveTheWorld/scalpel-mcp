@@ -1,0 +1,302 @@
+{
+  "source": "benchmarks/toolsets.py::SCALPEL_SCHEMAS",
+  "tools": [
+    {
+      "name": "build_context",
+      "description": "Build a relevance-ranked, token-budgeted project context: scores documents, paragraphs and symbols for a query and returns the best ones at the right level of detail (0 name, 1 signature/title, 2 +docstring, 3 +content). The context returns directly as compact text; format='json' adds the structured `entries` array. Use this first to orient yourself. `map` is a LEVEL, not a number: name the level and the tool owns the numbers behind it. The relevance floor is the tool's own configuration: there is nothing to tune.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "What you are looking for: the task, a question, or keywords."
+          },
+          "budget_tokens": {
+            "type": "integer",
+            "default": 8000,
+            "description": "Token budget for the returned context. The server default is 8000, and the campaign's workflow prompt passes budget_tokens=16000 on a TECHNICAL rebuild: the larger budget lets the decisive entries and their content in. Increase it when the reply reports truncated=true."
+          },
+          "max_level": {
+            "type": "integer",
+            "default": 3,
+            "description": "Maximum detail level (0-3)."
+          },
+          "breadth_ratio": {
+            "type": "number",
+            "default": 0.4,
+            "description": "Fraction of the budget spent listing many elements before deepening the best ones."
+          },
+          "map": {
+            "type": "string",
+            "enum": [
+              "none",
+              "names",
+              "structure"
+            ],
+            "default": "none",
+            "description": "Attach a project map to the top of the context. 'none' (default) attaches nothing; 'names' adds the folder/file tree; 'structure' adds the tree PLUS the mini-AST (symbol and paragraph ids, spans, sizes) of the files the query ranks highest. A level, not a token count: the map budget stays in the tool."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "'text' returns a compact labelled block (recommended); 'json' adds the structured `entries` array and costs more tokens for the same content."
+          },
+          "max_entries_per_file": {
+            "type": "integer",
+            "description": "Maximum entries allowed per source file or document (prevents a single document from monopolizing the context budget)."
+          },
+          "max_content_chars": {
+            "type": "integer",
+            "description": "Maximum characters per content entry at level 3 before truncation (default 2000)."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "get_project_map",
+      "description": "Return a compact, budgeted map of the whole project (documents + top-level symbols). Call this FIRST to orient yourself; it always reflects the live index, including edits made through the tools.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "budget_tokens": {
+            "type": "integer",
+            "default": 8000,
+            "description": "Approximate token budget for the map. Increase it (e.g. 16000) if the map is truncated."
+          },
+          "path": {
+            "type": "string",
+            "description": "Optional glob filter."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "text (default) returns a compact block: ~40% fewer tokens than the JSON envelope, which repeats derivable fields. json returns the structured payload."
+          }
+        }
+      }
+    },
+    {
+      "name": "search_symbols",
+      "description": "Find functions, methods or classes matching a query across the codebase. Pass view='contract' (signature, docstring, calls, callers) or view='implementation' to also read what it finds in the SAME call: an implementation view carries the 1-based line numbers and the content_hash edit_block expects, so the block can be edited straight from the reply, with no read_block in between. After the workspace matches, it also lists a few EXTERNAL symbols -- types, methods and properties of the NuGet packages the .csproj files reference -- marked [external_type]/[external_method]/[external_property] with their package and version: CONTRACT ONLY, the exact name to write in code (a type the workspace only reaches through `var` is found here), never editable.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Symbol name or substring (e.g., 'process_transaction' or 'AuthService')."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "function",
+              "method",
+              "class",
+              "all"
+            ],
+            "default": "all",
+            "description": "Filter by symbol kind: function, method, class, interface, namespace, struct, record, enum, property, constructor, destructor, operator, or all."
+          },
+          "path": {
+            "type": "string",
+            "description": "Optional glob filter (e.g., 'src/**/*.py')."
+          },
+          "limit": {
+            "type": "integer",
+            "default": 50,
+            "description": "Maximum number of matches."
+          },
+          "view": {
+            "type": "string",
+            "enum": [
+              "none",
+              "contract",
+              "implementation"
+            ],
+            "default": "none",
+            "description": "Inline the signature/docstring/calls/callers (contract) or the source (implementation) of every match, so no follow-up read_block call is needed."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "text (default) returns one compact line per item: ~50% fewer tokens than the JSON envelope, which repeats derivable fields. json returns the structured array."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "read_block",
+      "description": "A PATH returns the COMPLETE list of that block's children -- never paged, never truncated: a directory its entries ('/' marks a directory), a code file its symbols, a .md file its paragraphs plus the text no heading owns (with its hash), a .csproj/.json/.yaml its named properties. Each child carries its SHORT name inside its parent (never a full address; an overload adds its parameter list), its line span and its size (bytes for code, characters for a document), nested by indentation; a symbol also carries its KIND and its DECLARATION (class Spark, method Connect(string master) -> SparkContext), so the listing says what each member IS without reading it. A SYMBOL or a PARAGRAPH returns TEXT too: ONE header line (its address, its [kind], its [h:hash] and its number of lines), then its lines numbered from 1 -- the hash in the header is the expected_hash edit_block takes, and format='json' returns the same block as an object (id, content_hash, line_count, numbered_text). Address a child by writing its parent's path once, then '::' and the name printed here (src/a.cs::Classe::Methode, docs/spec.md::Section mere::Paragraphe); inside a directory, '/' and the name. Case, spaces, accents and punctuation are folded, so a copied name resolves; a short name unique in its file may be written alone; a name several blocks of one file share is refused, naming every candidate with its parameters and lines. A LISTING is rendered as text or as JSON -- the server's answer_format decides, and this call's format overrides it: text prints the block's own path on the first line, then the children indented under it, and comes back AS TEXT -- its line breaks are line breaks; JSON returns the object tree. A file NO parser and NO document reader claims (a .ps1, a .txt, a shell script) returns its WHOLE text, numbered from 1 with its hash, and is READ-ONLY. Ask for SEVERAL blocks in ONE call with paths=[...] -- THIS is what makes ONE turn read N blocks, and it is the biggest saving the tool offers: a block you would otherwise read on its OWN turn costs a turn, and a run that reads one block at a time pays for every one of them; if the paths you need are not yet known, name the ones you DO know in the same call instead of one call each: every requested block comes back in full, with its own numbered text and hash, so N blocks cost one turn instead of N. A WRITE takes a block, never a listing: a symbol or a paragraph is one, and so is a document path (its root text); a code file or a directory is not -- name one of the blocks printed under it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The path of ONE block: a file path, or a member path built with :: from the SHORT names read_block itself prints. A file path answers a LISTING; a symbol or a paragraph answers its numbered TEXT and hash."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "SEVERAL blocks in ONE call: a list of symbol or paragraph paths. The reply carries one numbered text -- and its hash -- per block, so N blocks cost one turn instead of N. Use it to re-read a batch you already know; use path to discover."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "description": "How the answer is rendered. A LISTING: 'text' returns plain text, the block's own path on the first line then its children indented, each with its kind and its declaration. A BLOCK (a symbol or a paragraph): 'text' returns one header line (address, kind, hash, line count), then the numbered lines as they are, unescaped. 'json' returns the object tree for both. Defaults to the server's configured answer format. A file no parser claims is not a listing: its whole text is returned numbered, read-only, in both formats."
+          }
+        }
+      }
+    },
+    {
+      "name": "edit_block",
+      "description": "Change ONE block by LINE, instead of resending it: ops on the 1-based numbers read_block returned, and only the new content is sent. A replace [a,b] range is INCLUSIVE: last > first replaces that whole sub-block, so merge adjacent changes into ONE operation instead of one per line; the line just outside the range (a-1 or b+1) is NOT consumed, so content that re-emits it would leave the block holding it twice: that write is REFUSED, nothing is written, and both line numbers are named. An insert_after that re-emits a line the block already carries is NOT refused (there is no range to extend): it is written and the copy is reported in warnings. An insert_after the block's LAST line in a CODE block writes into the FILE (the code becomes a sibling): the block keeps its own hash, and the reply says written_outside_block and returns the file listing with the address of what was created -- never send it again. Ops apply BOTTOM-UP, so an op never shifts the ones still to apply. The reply returns the updated numbered block and its new hash, so you can chain edits WITHOUT re-reading. There is NO whole-block variant: a full rewrite is a replace over lines 1..line_count. edit_block edits INSIDE one block and never changes the outline: in Markdown, when EVERY operation is an insertion (insert_after only -- no replace and no delete) and the content opens consecutive headings at the block's level (or a heading with subheadings), they cannot live inside the block, so they are CREATED as SIBLINGS right AFTER it and the reply carries insert_block's own fields (the id of the block it created, the parent it was created under, where it landed, its heading, its level and its number, and every id the call created) plus placement: 'after', host_block_unchanged: true and the host's content_hash, which still opens the block you edited -- the renumbering of the following paragraphs is reported in warnings. In C# code, adding only using directives to a namespace block is routed to the file's using region. Everything else that would reshape the outline is REFUSED (use insert_block, which numbers the new paragraph and keeps the following numbers consistent): a heading ABOVE the block's level, non-consecutive headings, or any call that also replaces or deletes lines -- the block itself then moves, so its sibling cannot be inferred. To change SEVERAL blocks in ONE call, pass edits=[{path, ops, expected_hash}, ...]: an entry that fails SYNTAX validation refuses the WHOLE call -- a batch is ALL-OR-NOTHING: nothing is written for ANY entry, so every expected_hash you sent still opens its block -- while an entry refused for any OTHER cause leaves the rest applied. Either way the reply says how many entries were applied, and N blocks cost one turn instead of N. THE ROUTE ABOVE HAS FURTHER CONDITIONS, and a call that breaks one is REFUSED with that condition named. (1) The title must be one the RESULT really gains, read as Markdown: a '#' inside a code fence is code and never a title, so an insertion whose point falls inside an open fence is written as code and creates nothing. (2) The insertion point must be the block's LAST line -- nothing but blank lines of the block may still follow it -- because a paragraph at this level is seated AFTER the block: when the block's own lines still follow the point, the place asked for cannot be respected and the refusal says so, naming the line (a heading sent at line 0 lands BEFORE the block, and that IS honoured where it was asked for). (3) No other operation of the call may write into the block: creating the section and rewriting the block are two writes, and a call that can half-apply is worse than a refusal, so a call that also writes into the block is refused. THE HOST'S HASH IS RE-READ AFTER THE WRITE: host_content_hash is the one the block holds NOW, and host_block_unchanged is true only when it really did not move -- seating a paragraph after the LAST block of a file re-lays the end of the file, and then the hash HAS moved and the reply says so. AND THE ROUTE PASSES THE SAME GUARDS AS ANY OTHER EDIT, ON THE RESULT, BEFORE IT WRITES: what the call WOULD produce is checked first, so an inserted paragraph that leaves a code fence open is REFUSED exactly as it is inside a block (every heading after the fence would stop being Markdown, and the rest of the document would stop being sections), and a title a sibling already carries is refused by the same test -- no call reaches through edit_block a state the ordinary path refuses. Nothing is left behind by a refusal: the check runs on a DRY RUN of what the call would write, so no file byte AND no index pass. In a batch, every entry is expressed against the version you READ, and the tool translates the numbers for you. THE CALL LOCKS EVERY FILE IT TOUCHES, in the ALPHABETICAL order of their normalised absolute paths -- a fixed order is what forbids a deadlock between two calls that cross, [a, b] against [b, a] -- and holds each lock across the writes AND the index pass: a READER of the same file waits its turn instead of reading a version the writer is about to move, two DIFFERENT files never see each other, and a holder that dies is released by the system, the lock living on the OS and dying with its process. A holder that does not give way within the timeout is answered with a refusal that says NOTHING was written for ANY entry of the call, so every expected_hash you sent still opens its block. WHEN AN ENTRY WRITES AND MOVES LINES, the tool REBASES the entries that follow it: aim every entry at the version you READ, never at an intermediate state, and a rebased entry is APPLIED, not refused. What is followed is the IDENTITY of a line -- its number in the version you read -- and NOT the text you read: with a repeated line such as \"- dup\", the write lands on the copy you aimed at, not on the other one. THE REBASING REFUSES ONLY TWICE: (1) two entries of THIS call write the SAME line of the version you read -- a real conflict, and the refusal NAMES the line and the entry that wrote it first, the reply carrying rebased_by and conflict: true; (2) a writer OUTSIDE the tool moved the file between your read and this call (a person in an editor, a git checkout) -- the reply says Stale read and returns the FRESH block, numbered and stamped, to re-send against in this same call. AN ENTRY THAT WAS REBASED SAYS SO: expected_hash_rebased is true, rebased_by names the entry that wrote, and rebase carries your_lines (the numbers you wrote) and moved_by_entry; a warning names that entry, in ONE of TWO formulations. When the lines you aimed at MOVED: \"entry N of THIS call wrote this block after you read it, so the lines you aimed at had MOVED. The tool rebased them: the operations you sent were applied to the lines you read, nothing was refused, and your 1-based numbers still designate them. The stamp you sent is NOT reusable -- this reply carries the current one.\" When another entry of the same call wrote the same FILE without moving the lines you aim at: \"another entry of THIS call wrote the same FILE after you read it, so the stamp you sent was one version behind -- but every line this entry aims at still holds exactly what you read, so nothing had to be rebased. The operations were applied and nothing was refused. The stamp you sent is NOT reusable: this reply carries the current one.\" In BOTH cases the stamp you sent is NOT reusable: the reply carries the current one. A numbering notice names the OTHER sections that carry the number, and the block you edited too when its OWN title is carried elsewhere (a real duplicate is never silenced); where the new lines landed is read from your own operations ('BEFORE its first line' when they land above the block).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Symbol id, paragraph id, or a document path (its root text). A code file or a directory names no block: name one of the symbols read_block prints under it. Omit it when you pass edits=[...]."
+          },
+          "ops": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Line operations, 1-based, applied bottom-up: {\"replace\": [first, last], \"content\": \"...\"}, {\"delete\": [first, last]}, or {\"insert_after\": n, \"content\": \"...\"}. Omit it when you pass edits=[...]."
+          },
+          "expected_hash": {
+            "type": "string",
+            "description": "The version stamp of the block whose text you are editing, returned WITH that text: by read_block, by a search that inlines the content, or by a Dossier entry that carries it. Your line numbers describe THAT version; if the block changed since, the edit is refused with the fresh numbered text and the exact call to send -- instead of being applied to different lines; and if the stamp belongs to ANOTHER block, the refusal NAMES that block, because a hash opens one block and only that one. Optional, but without it nothing checks that your numbers still describe this content."
+          },
+          "edits": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "SEVERAL blocks in ONE call: a list of {path, ops, expected_hash} objects, applied in the order given; a path given at the top level beside edits is USED when the call holds ONE entry (the reply says so); with SEVERAL entries each one carries ITS OWN path (or an expected_hash that uniquely identifies the block); otherwise the refusal names the entry that has none. Every entry is validated and answered exactly like a single call, in results, in the same order; a batch is ALL-OR-NOTHING: an entry that fails SYNTAX validation refuses the WHOLE call -- nothing is written for ANY entry, so every expected_hash you sent still opens its block -- while an entry refused for any OTHER cause leaves the rest applied. Either way the reply says how many entries were applied. Use it to spend one turn on N blocks instead of N turns."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "text (default) returns a compact confirmation with a targeted diff snippet and the new content_hash; json returns the full structured dictionary with numbered_text."
+          }
+        }
+      }
+    },
+    {
+      "name": "delete_block",
+      "description": "Remove ONE block: a code symbol (file.cs::Classe::Methode) or a Markdown paragraph (file.md::Section mere::Paragraphe). The block own nature decides which, so there is no separate tool per kind. Deleting a code symbol removes everything it holds; deleting a Markdown paragraph removes its heading and its own text, and the paragraphs under it move up to its parent -- the reply names them. It never removes a whole FILE or a DIRECTORY, only a block inside one.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path of the block to remove."
+          },
+          "expected_heading": {
+            "type": "string",
+            "description": "Optional guard for a Markdown paragraph: the heading you believe sits there. Refuses the deletion when the path has shifted to another paragraph."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "search_documents",
+      "description": "Find the right document paragraph. The query is matched term by term, so a wording no paragraph contains verbatim still returns its best partial evidence. The two best matches come back with their full text: read those directly and do NOT re-run the same search.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search text (an empty query returns every paragraph)."
+          },
+          "path": {
+            "type": "string",
+            "description": "Optional glob filter."
+          },
+          "limit": {
+            "type": "integer",
+            "default": 8,
+            "description": "Maximum number of matches."
+          },
+          "full_top": {
+            "type": "integer",
+            "default": 2,
+            "description": "How many of the best matches come back with their whole text inlined."
+          },
+          "include_content": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true to inline the full text of every match instead of an excerpt."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "default": "text",
+            "description": "text (default) returns one compact line per item: ~50% fewer tokens than the JSON envelope, which repeats derivable fields. json returns the structured array."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "insert_block",
+      "description": "Insert a new block as a CHILD of a parent block, and return the state of the block you just made: its id, its numbered text and its hash -- so the next call needs no read_block and no guess. This is the ONLY way to add a paragraph: edit_block never touches the outline. parent is the block that receives the child, written as a PATH like every other name here: a document path means the document itself, whose children are its top-level sections, a paragraph path (guide.md::Section mere::Paragraphe) means that paragraph, a code path (T.cs::Classe::Methode) means that symbol, and a DIRECTORY path CREATES the child, whose name is the FIRST LINE of text (a trailing slash on that name makes a directory -- the name carries the type, no other field does). A file or a directory created this way is removed OUTSIDE the tools: nothing on this surface deletes one.. anchor is OPTIONAL: omit it to insert as the FIRST child -- in a document that means ABOVE its current first section, and since the level comes from the parent a '##' written there is written as '#' -- or pass the id of one of its children to place the new block right after it AND everything that child holds (a container owns its whole subtree); under a directory, whose children are ordered by name, omit it. text is the new block: its FIRST LINE is the title, or under a directory the name of the file or directory to create, the rest is the body, or the file content. The level (one deeper than the parent) and the number (from the children around it) are the tool business: a leading # marker on the title is accepted and dropped. Refused if the placement or the title would contradict the tree.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "parent": {
+            "type": "string",
+            "description": "Block that receives the child, as a path: a document, a paragraph (guide.md::Section mere::Paragraphe), a code symbol (T.cs::Classe::Methode), or a DIRECTORY, which CREATES the child inside it."
+          },
+          "anchor": {
+            "type": "string",
+            "description": "Optional. Omit it to insert FIRST; otherwise the id of a child of parent to insert right after it AND after everything that child holds (a container owns its whole subtree)."
+          },
+          "text": {
+            "type": "string",
+            "description": "The new block: first line = title (under a directory, the name of the file or directory to create), rest = body."
+          }
+        },
+        "required": [
+          "parent",
+          "text"
+        ]
+      }
+    }
+  ]
+}

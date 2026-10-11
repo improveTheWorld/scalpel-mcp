@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.agent_graph.db*
+.benchmark-work/
+benchmarks/.work/
+*.zip
+# Resultats de benchmark : on versionne les rapports et les tableaux de runs
+# (quelques centaines de Ko, c'est la preuve des chiffres), on exclut les traces
+# brutes -- journaux .jsonl et transcripts .json, ~47 Mo.
+# Regle gitignore : un fichier n'est reinclusible que si ses parents le sont
+# d'abord, d'ou le !.../**/ avant les extensions.
+benchmarks/results/**
+!benchmarks/results/**/
+!benchmarks/results/**/*.csv
+!benchmarks/results/**/*.md
+!benchmarks/results/**/*.diff
+!benchmarks/results/**/*.log
+.venv/
+venv/
+env/
+.tmp_*
+# Sondes de travail jetables (scripts _xxx.py) : jamais versionnees.
+_*.py
