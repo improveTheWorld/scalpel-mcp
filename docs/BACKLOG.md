@@ -122,19 +122,31 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
 * **Suppression du message d'erreur circulaire** : Dans `toolsets.py` (`_plain_tool_error`), suppression de la consigne toxique *"find it with search_documents"* en cas de panne de l'outil.
 * **Validation unitaire** : 625/625 tests passés avec succès (`test_search_documents_robustness.py`).
 
-## 8. Chantier Efficacite Agent : Reduction de la Friction sur la Lecture et l'Ecriture Groupees
+## 8. Chantier Efficacité Agent : Réduction de la Friction sur la Lecture et l'Écriture Groupées
 
-Ce chantier repond au constat empirique mesure sur les sessions DSH et le banc d'evaluation : les agents sous-utilisent la lecture groupee (paths=[...]) et evitent l'ecriture groupee (edits=[...]), preferant un mode sequentiel precautionneux qui multiplie les tours d'agent (2 a 5 s de paroi par tour) et alourdit l'historique de conversation.
+Ce chantier répond au constat empirique mesuré sur les sessions DSH et consolidé par la campagne de référence de 10 runs (`reference_series_10`, 13/10/2026) :
+- Les agents adoptent la lecture groupée (`paths=[...]`) dès lors qu'elle est explicitement ordonnée dans le prompt (atteignant **61,2 %** de lectures groupées sur le benchmark contre < 5 % dans les sessions interactives DSH non outillées).
+- En revanche, l'écriture groupée (`edit_block(edits=[...])`) reste plafonnée à **21,9 %** et subit un taux de rejet élevé en raison de verrous syntaxiques stricts dans le moteur de patch.
 
-### A. Incitation et fluidification de la lecture groupee (paths=[...]) -- S2 / Fort Impact
-* **Constat** : Apres un read_block sur un fichier qui liste les symboles, l'agent effectue souvent plusieurs read_block sequentiels au lieu de demander les 2 ou 3 symboles d'interet en un seul appel.
-* **Pistes d'amelioration** :
-  1. **Contrat & Guidage** : Expliciter dans le prompt de demarrage qu'apres identification des symboles d'un fichier, l'agent doit de preference passer par read_block(paths=['file::f1', 'file::f2']).
-  2. **Indice d'action dans le retour de listing** : Quand read_block renvoie un listing de membres de code ou de sections Markdown, inclure un hint d'appel compact (ex: 'Call read_block(paths=[...]) to read multiple members in one turn').
+### A. Incitation et fluidification de la lecture groupée (`paths=[...]`) — S2 / Fort Impact
+* **Faits établis (Campagne 13/10/2026)** :
+  * 60 lectures groupées vs 38 unitaires observées quand le prompt système porte la directive directe *« Pass ALL the identifiers you need to read_block(paths=[...]) in ONE call »*.
+  * Dans DSH, l'absence de cette directive conduit les agents à un parcours séquentiel coûteux (1 tour par symbole).
+* **Actions Moteur & Contrat** :
+  1. **Contrat DSH** : Aligner le prompt de session DSH sur celui du benchmark pour ordonner le regroupement dès l'identification d'une liste de symboles ou de sections.
+  2. **Indice d'action dans les retours de listing** : Dans `read_block`, lorsqu'un listing de membres de code ou de plan Markdown est renvoyé, enrichir la réponse avec un rappel actionnable : `Call read_block(paths=['<file>::sym1', '<file>::sym2']) to read multiple members in one turn`.
 
-### B. Simplification et securisation de l'ecriture multi-blocs -- S2 / Ergonomie
-* **Constat** : edit_block(edits=[...]) est percu comme risque par les agents en raison de la dependance stricte aux hashes (expected_hash) et de la politique tout-ou-rien (ALL-OR-NOTHING). Tout decalage ou syntaxe invalide sur un bloc fait echouer l'ensemble du lot, ce qui pousse l'agent vers un comportement sequentiel minimax.
-* **Pistes d'amelioration** :
-  1. **Support fluide du multi-tool calling natif** : Documenter et optimiser la prise en charge d'appels edit_block paralleles distincts dans la meme reponse de l'agent (pour des fichiers independants), alternative plus naturelle pour les modeles que l'objet imbrique edits=[...].
-  2. **Tolerance aux ecritures multi-blocs dans le meme fichier** : Faciliter le rebase automatique d'AST en tolerante que des modifications successives sur des blocs freres ou enfants du meme fichier partagent le hash de depart sans exiger un recalcul mental intermediaire du hash pour chaque operation.
-  3. **Diagnostic enrichi en cas de refus** : Ameliorer les messages de conflit de rebase pour indiquer directement le patch ou le hash actualise attendu.
+### B. Simplification et fiabilisation de l'écriture multi-blocs (`edit_block`) — S1 / Prioritaire
+* **Faits établis & Découverte de l'Éplucheur Automatique (Runs r1, r2, r8)** :
+  * **Cas d'échec n°1 : Conflit d'insertion à même position** (`another insert already targets position N`).
+    * *Symptôme observé (r1 t12, r1 t13)* : L'agent envoie deux opérations `insert_after` ciblant la même ligne (ex: ajouter deux sections ou blocs consécutifs). Le moteur Scalpel rejette la 2e opération, forçant l'agent à dépenser 2 tours supplémentaires pour re-découper son batch.
+    * *Action* : Autoriser le chaînage d'insertions multiples au même point d'ancrage en les ordonnant séquentiellement (FIFO/LIFO prévisible) plutôt que de lever un conflit bloquant.
+  * **Cas d'échec n°2 : Boucle de répétition sur refus noop** (`identical content / status: noop`).
+    * *Symptôme mesuré (r8, tours 50 à 80)* : L'agent tente d'éditer un bloc déjà modifié ou identique, reçoit une réponse partielle ou un `noop`, et boucle pendant 30 tours consécutifs jusqu'au plafond `max_turns` (80 tours perdus, coût > 11M tokens).
+    * *Action* : Si une opération produit un `noop` (contenu déjà identique), renvoyer explicitement `status: success` ou un avertissement non bloquant plutôt qu'un statut d'erreur ambigu qui désoriente le raisonnement de l'agent.
+  * **Cas d'échec n°3 : Conflit d'opérations vides (`ops is empty`)**.
+    * *Symptôme (r2 t16)* : Un lot d'éditions dont une entrée a `ops: []` fait échouer l'entrée au lieu de l'ignorer proprement.
+    * *Action* : Traiter une entrée `ops: []` comme un noop valide avec avertissement.
+
+### C. Automatisation de l'Épluchage Déterministe (`benchmarks/peeler.py`) — Fait (13/10/2026)
+* L'épluchage de chaque run n'est plus une contrainte contractuelle humaine : il est câblé nativement dans le runner (`benchmarks/runner.py`) et produit automatiquement un bilan JSON structuré (`<run>.peel.json`) sans aucun surcoût LLM.
