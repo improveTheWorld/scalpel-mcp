@@ -19,14 +19,15 @@ Le projet Scalpel repose sur quatre piliers directeurs validés par les bancs de
 
 Les campagnes de benchmark (`campaign_v3`) et les stress-tests du 13/10/2026 sur 1 000 sections ont mis en lumière un goulot d'étranglement critique sur la recherche documentaire (`search_documents`). Ces quatre chantiers sont classés en **Priorité Absolue**.
 
-### A. Migration du moteur documentaire vers SQLite FTS5 + BM25 natif (Gain : x20 à x50) — Fait (13/10/2026)
+### A. Migration du moteur documentaire vers SQLite FTS5 + BM25 natif (Gain : x20 à x50) — En cours (Table FTS5 créée, requête search_documents à brancher)
 * **Symptôme & Mesure** : `DatabaseManager.search_documents` (`scalpel-mcp/src/ast_graph_server/database.py`) effectuait un table scan linéaire complet via `WHERE (s.heading LIKE ? OR s.content LIKE ?)`.
   * Sur 1 000 sections : **56 ms à 376 ms** par requête.
   * Sur 50 000+ sections : latence de **plusieurs secondes par appel**, bloquant l'agent.
 * **Solution technique & Validée** :
   1. Création de la table virtuelle SQLite FTS5 `document_sections_fts` avec tokenizer `unicode61`.
   2. Synchronisation atomique dans `upsert_document` et `delete_document`.
-  3. Tests unitaires dédiés validés (`test_document_sections_fts_indexing_and_cleanup`).
+  3. Tests unitaires dédiés validés (`test_fts5_sync_on_upsert_and_delete`, `test_fts5_special_syntax_queries_behavior`).
+  4. ⚠️ **Reste à brancher** : La table virtuelle est alimentée, mais `DatabaseManager.search_documents` utilise toujours le fallback `LIKE` en attendant la normalisation des requêtes de matching FTS5.
 * **Gain attendu** : Recherche plein texte avec ranking BM25 natif et latence divisée par 20 à 50.
 
 ### B. Suppression du motif SQL N+1 sur l'inlining des sections (Gain : x5 à x10) — Fait (13/10/2026)
