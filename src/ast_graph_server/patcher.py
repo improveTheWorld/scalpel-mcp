@@ -491,12 +491,13 @@ class Patcher:
         from . import tracing
 
         tracing.note("resolve_start", block_id=block_id)
-        if "::" in block_id:
+        symbol = self.db.get_symbol(block_id)
+        if not symbol and "::" in block_id:
             resolved = self._resolve_displayed_path(block_id)
             tracing.note("resolve_named", block_id=block_id, resolved=resolved)
             if resolved:
                 block_id = resolved
-        symbol = self.db.get_symbol(block_id)
+                symbol = self.db.get_symbol(block_id)
         if symbol:
             try:
                 abs_path = self.config.to_absolute_path(symbol.file_path)

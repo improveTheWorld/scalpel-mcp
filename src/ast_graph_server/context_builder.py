@@ -19,6 +19,8 @@ from .config import ServerConfig
 from .context_config import ContextTieringConfig
 from .database import DatabaseManager
 from .relevance import RelevanceBackend, build_backend
+from .lineops import numbered
+from .parsers.base import compute_content_hash
 from .rendering import render_project_tree
 
 
@@ -80,6 +82,13 @@ class ContextBuilder:
         self.addresses: Optional[Any] = None
         self.scope: str = "subsequent"
         self.tiering_config: Optional[ContextTieringConfig] = tiering_config
+        self._entity_cache: Dict[Tuple[str, str], Any] = {}
+        self._metrics_cache: Dict[str, Any] = {}
+        self._symbol_addresses_cache: Dict[str, Dict[str, str]] = {}
+        self._document_addresses_cache: Dict[str, Dict[str, str]] = {}
+        self._document_sections_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._file_bytes_cache: Dict[str, bytes] = {}
+        self._render_cache: Dict[Any, Any] = {}
 
     def set_scope(self, scope: str) -> None:
         """Set active scope: 'initial' (Initial Dossier) or 'subsequent' (agent technical context)."""
@@ -122,15 +131,19 @@ class ContextBuilder:
         """
         if self.addresses is None:
             return {}
-        return self.addresses.symbol_addresses(file_path)
+        if file_path not in self._symbol_addresses_cache:
+            self._symbol_addresses_cache[file_path] = self.addresses.symbol_addresses(file_path)
+        return self._symbol_addresses_cache[file_path]
 
     def _document_addresses(self, document_id: str) -> Dict[str, str]:
         if self.addresses is None or not document_id:
             return {}
-        return self.addresses.document_addresses(document_id)
+        if document_id not in self._document_addresses_cache:
+            self._document_addresses_cache[document_id] = self.addresses.document_addresses(document_id)
+        return self._document_addresses_cache[document_id]
 
     def _stamped_entry(
-        self, address: str, block_ref: str, max_chars: Optional[int] = None
+        self, address: str, block_ref: str, max_chars: Optional[int] = None, metrics: Optional[Dict[str, Any]] = None
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
         """The text of a level-3 entry: the block's OWN numbered lines PLUS its stamp.
 
@@ -142,7 +155,12 @@ class ContextBuilder:
         When the content does not fit the entry bound the text is marked incomplete and NO hash is
         given: a stamp must never stand for text the caller has not seen.
         """
-        metrics = self.addresses.block_metrics(block_ref) if self.addresses is not None else None
+        if metrics is None:
+            if block_ref in self._metrics_cache:
+                metrics = self._metrics_cache[block_ref]
+            elif self.addresses is not None:
+                metrics = self.addresses.block_metrics(block_ref)
+                self._metrics_cache[block_ref] = metrics
         if metrics is None:
             return None
         numbered = str(metrics.get("numbered_text") or "")
@@ -170,9 +188,11 @@ class ContextBuilder:
     def _symbol_text(self, symbol: Any, level: int, max_chars: Optional[int] = None) -> Tuple[str, Dict[str, Any]]:
         if level <= 0:
             return symbol.name, {}
-        printed = self._symbol_addresses(str(symbol.file_path)).get(symbol.id, str(symbol.id))
+        addr_map = self._symbol_addresses(str(symbol.file_path))
+        printed = addr_map.get(str(symbol.id)) or addr_map.get(symbol.id, str(symbol.id))
         if level >= 3:
-            stamped = self._stamped_entry(printed, str(symbol.id), max_chars=max_chars)
+            metrics = self._metrics_for_symbol(symbol)
+            stamped = self._stamped_entry(printed, str(symbol.id), max_chars=max_chars, metrics=metrics)
             if stamped is not None:
                 return stamped
         base = symbol.kind + " " + printed + "  " + symbol.signature
@@ -183,7 +203,9 @@ class ContextBuilder:
         if level == 2:
             return base, {}
         try:
-            code = self.config.to_absolute_path(symbol.file_path).read_bytes()[symbol.start_byte : symbol.end_byte]
+            abs_p = self.config.to_absolute_path(symbol.file_path)
+            raw = self._get_cached_file_bytes(abs_p)
+            code = raw[symbol.start_byte : symbol.end_byte]
             return base + "\n" + self._bounded_content(code.decode("utf-8", errors="replace"), max_chars=max_chars), {}
         except Exception:
             return base, {}
@@ -214,7 +236,7 @@ class ContextBuilder:
         # has to call list_document_sections to rebuild them.
         outline = []
         printed = self._document_addresses(path)
-        for item in self.db.get_document_sections(path)[:40]:
+        for item in self._get_cached_document_sections(path)[:40]:
             raw_id = str(item.get("id") or item.get("section_id") or "")
             heading = (item.get("heading") or "").strip() or "(untitled)"
             outline.append(printed.get(raw_id, raw_id) + " " + heading)
@@ -235,17 +257,147 @@ class ContextBuilder:
             return base, {}
         return base + "\n  " + "\n  ".join(outline), {}
 
+    def _clear_ephemeral_caches(self) -> None:
+        self._entity_cache.clear()
+        self._metrics_cache.clear()
+        self._symbol_addresses_cache.clear()
+        self._document_addresses_cache.clear()
+        self._document_sections_cache.clear()
+        self._file_bytes_cache.clear()
+        self._render_cache.clear()
+
+    def _get_cached_file_bytes(self, abs_path: Any) -> bytes:
+        key = str(abs_path)
+        if key not in self._file_bytes_cache:
+            self._file_bytes_cache[key] = abs_path.read_bytes()
+        return self._file_bytes_cache[key]
+
+    def _metrics_for_symbol(self, symbol: Any) -> Optional[Dict[str, Any]]:
+        block_ref = str(symbol.id)
+        if block_ref in self._metrics_cache:
+            return self._metrics_cache[block_ref]
+        try:
+            abs_path = self.config.to_absolute_path(symbol.file_path)
+            raw = self._get_cached_file_bytes(abs_path)
+            slice_bytes = raw[symbol.start_byte : symbol.end_byte]
+            content = slice_bytes.decode("utf-8", errors="replace")
+            metrics = {
+                "kind": "symbol",
+                "meta": {"file_path": symbol.file_path, "symbol_kind": symbol.kind},
+                "content": content,
+                "content_hash": compute_content_hash(content.encode("utf-8")),
+                "line_count": len(content.splitlines()),
+                "numbered_text": numbered(content, 1),
+            }
+            self._metrics_cache[block_ref] = metrics
+            return metrics
+        except Exception:
+            if self.addresses is not None:
+                metrics = self.addresses.block_metrics(block_ref)
+                self._metrics_cache[block_ref] = metrics
+                return metrics
+            return None
+
+    def _get_cached_symbol(self, ref_id: str) -> Any:
+        key = ("symbol", str(ref_id))
+        if key not in self._entity_cache:
+            self._entity_cache[key] = self.db.get_symbol(ref_id)
+        return self._entity_cache[key]
+
+    def _get_cached_section(self, ref_id: str) -> Any:
+        key = ("section", str(ref_id))
+        if key not in self._entity_cache:
+            self._entity_cache[key] = self.db.get_document_section(ref_id)
+        return self._entity_cache[key]
+
+    def _get_cached_document(self, ref_id: str) -> Any:
+        key = ("document", str(ref_id))
+        if key not in self._entity_cache:
+            self._entity_cache[key] = self.db.get_document(ref_id)
+        return self._entity_cache[key]
+
+    def _get_cached_document_sections(self, document_id: str) -> List[Dict[str, Any]]:
+        if document_id not in self._document_sections_cache:
+            self._document_sections_cache[document_id] = self.db.get_document_sections(document_id)
+        return self._document_sections_cache[document_id]
+
     def render(self, kind: str, ref_id: str, level: int, max_chars: Optional[int] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
+        cache_key = (kind, str(ref_id), level, max_chars)
+        if cache_key in self._render_cache:
+            return self._render_cache[cache_key]
+
+        res = None
         if kind == "symbol":
-            symbol = self.db.get_symbol(ref_id)
-            return self._symbol_text(symbol, level, max_chars=max_chars) if symbol else None
-        if kind == "section":
-            section = self.db.get_document_section(ref_id)
-            return self._section_text(section, level, max_chars=max_chars) if section else None
-        if kind == "document":
-            document = self.db.get_document(ref_id)
-            return self._document_text(document, level, max_chars=max_chars) if document else None
-        return None
+            symbol = self._get_cached_symbol(ref_id)
+            if symbol:
+                res = self._symbol_text(symbol, level, max_chars=max_chars)
+        elif kind == "section":
+            section = self._get_cached_section(ref_id)
+            if section:
+                res = self._section_text(section, level, max_chars=max_chars)
+        elif kind == "document":
+            document = self._get_cached_document(ref_id)
+            if document:
+                res = self._document_text(document, level, max_chars=max_chars)
+
+        self._render_cache[cache_key] = res
+        return res
+
+    def _batch_resolve_printed_refs(self, entries: Sequence[ContextEntry]) -> Dict[str, str]:
+        """Resolve canonical display IDs for entries in batch by file, avoiding N+1 queries."""
+        if self.addresses is None:
+            return {entry.ref_id: entry.ref_id for entry in entries}
+
+        resolved: Dict[str, str] = {}
+        symbols_by_file: Dict[str, List[ContextEntry]] = {}
+        sections_by_doc: Dict[str, List[ContextEntry]] = {}
+
+        for entry in entries:
+            if entry.kind == "symbol":
+                sym = self._get_cached_symbol(entry.ref_id)
+                if sym and sym.file_path:
+                    symbols_by_file.setdefault(str(sym.file_path), []).append(entry)
+                else:
+                    resolved[entry.ref_id] = self._printed_ref(entry.ref_id)
+            elif entry.kind == "section":
+                sec = self._get_cached_section(entry.ref_id)
+                doc_id = str(sec.get("document_id") or "") if sec else entry.ref_id.partition("#")[0]
+                if doc_id:
+                    sections_by_doc.setdefault(doc_id, []).append(entry)
+                else:
+                    resolved[entry.ref_id] = self._printed_ref(entry.ref_id)
+            elif entry.kind == "document":
+                resolved[entry.ref_id] = entry.ref_id
+            else:
+                resolved[entry.ref_id] = self._printed_ref(entry.ref_id)
+
+        for file_path, sym_entries in symbols_by_file.items():
+            addr_map = self._symbol_addresses(file_path)
+            for entry in sym_entries:
+                sym = self._get_cached_symbol(entry.ref_id)
+                sym_id_str = str(sym.id) if sym else entry.ref_id
+                if sym_id_str in addr_map:
+                    resolved[entry.ref_id] = addr_map[sym_id_str]
+                elif entry.ref_id in addr_map:
+                    resolved[entry.ref_id] = addr_map[entry.ref_id]
+                else:
+                    resolved[entry.ref_id] = self._printed_ref(entry.ref_id)
+
+        for doc_id, sec_entries in sections_by_doc.items():
+            addr_map = self._document_addresses(doc_id)
+            for entry in sec_entries:
+                sec = self._get_cached_section(entry.ref_id)
+                raw_id = str((sec.get("section_id") or sec.get("id")) if sec else entry.ref_id)
+                if raw_id in addr_map:
+                    resolved[entry.ref_id] = addr_map[raw_id]
+                elif entry.ref_id in addr_map:
+                    resolved[entry.ref_id] = addr_map[entry.ref_id]
+                elif "#" in entry.ref_id and entry.ref_id.rsplit("#", 1)[1] == "preamble":
+                    resolved[entry.ref_id] = doc_id
+                else:
+                    resolved[entry.ref_id] = self._printed_ref(entry.ref_id)
+
+        return resolved
 
     def _project_map_text(self, budget_chars: int) -> str:
         """A query-independent structural map, rendered from the indexed files."""
@@ -370,6 +522,7 @@ class ContextBuilder:
         tiering_config: Optional[ContextTieringConfig] = None,
         format: str = "text",
     ) -> Dict[str, Any]:
+        self._clear_ephemeral_caches()
         # Resolve tiering configuration dynamically (allows live updates from context_config.json)
         cfg = tiering_config or self.tiering_config or ContextTieringConfig.load(workspace_root=self.config.workspace_root)
         effective_scope = scope or self.scope
@@ -484,39 +637,40 @@ class ContextBuilder:
                 order.append(key)
 
             # Phase 2: deepen the highest-ranked elements while the budget allows.
-            for level in range(1, max_level + 1):
-                for key in order:
-                    entry = entries[key]
-                    if entry.level >= level:
-                        continue
-                    if tiering.enabled and entry.score < tiering.deepen_min_score and level > tiering.low_tier_max_level:
-                        continue
-                    rendered_entry = self.render(entry.kind, entry.ref_id, level, max_chars=max_content_chars)
+            # Phase 2: single-pass deepening on candidates in score-descending order.
+            for key in order:
+                entry = entries[key]
+                target_max_level = max_level
+                if tiering.enabled and entry.score < tiering.deepen_min_score:
+                    target_max_level = min(max_level, tiering.low_tier_max_level)
+
+                for lvl in range(target_max_level, entry.level, -1):
+                    rendered_entry = self.render(entry.kind, entry.ref_id, lvl, max_chars=max_content_chars)
                     if rendered_entry is None:
                         continue
                     text, extra = rendered_entry
                     delta = len(text) - len(entry.text)
                     if delta <= 0:
-                        entry.level = level
+                        entry.level = lvl
                         entry.text = text
                         entry.content_hash = extra.get("content_hash")
                         entry.line_count = extra.get("line_count")
-                        continue
-                    if used + delta > budget_chars:
-                        continue
-                    used += delta
-                    entry.level = level
-                    entry.text = text
-                    entry.content_hash = extra.get("content_hash")
-                    entry.line_count = extra.get("line_count")
-
+                        break
+                    if used + delta <= budget_chars:
+                        used += delta
+                        entry.level = lvl
+                        entry.text = text
+                        entry.content_hash = extra.get("content_hash")
+                        entry.line_count = extra.get("line_count")
+                        break
         ordered = sorted(entries.values(), key=lambda entry: entry.score, reverse=True)
+        printed_refs = self._batch_resolve_printed_refs(ordered)
         rendered: List[Dict[str, Any]] = []
         for entry in ordered:
             item: Dict[str, Any] = {
                 "kind": entry.kind,
                 # The address the caller can USE, not the storage id: one grammar, everywhere.
-                "ref_id": self._printed_ref(entry.ref_id),
+                "ref_id": printed_refs.get(entry.ref_id) or self._printed_ref(entry.ref_id),
                 "level": entry.level,
                 "score": round(entry.score, 6),
                 "text": entry.text,
