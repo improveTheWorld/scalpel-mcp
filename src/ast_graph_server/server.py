@@ -1324,8 +1324,11 @@ class ASTGraphServer:
             resolved_map_tokens = map_tokens
             resolved_map_detail = map_detail
             if map != "none":
+                max_map_tokens = int(resolved_budget * 0.3)
                 if resolved_map_tokens is None:
-                    resolved_map_tokens = self.context_builder.MAP_LEVEL_TOKENS[map]
+                    resolved_map_tokens = min(self.context_builder.MAP_LEVEL_TOKENS[map], max_map_tokens)
+                else:
+                    resolved_map_tokens = min(resolved_map_tokens, max_map_tokens)
                 if resolved_map_detail == "names":
                     resolved_map_detail = map
             payload = self.context_builder.build(
@@ -1339,9 +1342,9 @@ class ASTGraphServer:
                 min_score=resolved_min_score,
                 max_entries_per_file=max_entries_per_file,
                 max_content_chars=max_content_chars,
+                format=format,
             )
             if format == "json":
-                payload["context"] = payload["text"]
                 return payload
             return payload["text"]
 

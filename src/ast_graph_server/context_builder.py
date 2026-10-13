@@ -45,6 +45,7 @@ class ContextBuilder:
     # token. The previous value of 4 understated a rendered payload by ~20%,
     # so an "8000 token" budget actually produced up to ~12k tokens on the wire.
     CHARS_PER_TOKEN = 3.3
+    CHARS_PER_TOKEN_JSON = 1.3
 
     #: Default budgets for the agent-facing detail levels: 1 = a quick look,
     #: 5 = deep. The agent asks for a level; the tool owns the token price.
@@ -367,6 +368,7 @@ class ContextBuilder:
         max_content_chars: Optional[int] = None,
         scope: Optional[str] = None,
         tiering_config: Optional[ContextTieringConfig] = None,
+        format: str = "text",
     ) -> Dict[str, Any]:
         # Resolve tiering configuration dynamically (allows live updates from context_config.json)
         cfg = tiering_config or self.tiering_config or ContextTieringConfig.load(workspace_root=self.config.workspace_root)
@@ -380,35 +382,32 @@ class ContextBuilder:
 
         # The budget is expressed in tokens but the packer measures characters,
         # so the conversion factor decides whether the budget is real. At 4 the
-        # payload overshot by ~1.5x in tokens; 3.3 is the measured ratio.
-        budget_chars = max(400, int(budget_tokens * self.CHARS_PER_TOKEN))
+        # payload overshot by ~1.5x in tokens; 3.3 is the measured ratio for text,
+        # while JSON requires 1.3 chars/token to account for serialization overhead.
+        chars_per_token = self.CHARS_PER_TOKEN_JSON if format == "json" else self.CHARS_PER_TOKEN
+        total_budget_chars = max(400, int(budget_tokens * chars_per_token))
+        budget_chars = total_budget_chars
+
         # An optional project map: a query-independent structural header (folders,
         # sub-folders, file names) placed at the top of the context.
-        #
-        # Two ways to size it, and they are NOT equivalent:
-        #   * map_ratio carves the map out of the section budget (historical form).
-        #     An A/B on map_ratio therefore compares the map against a SMALLER
-        #     selection, not against none -- measured on 25/09: the arm with the map
-        #     had a *shorter* prompt, because the map displaced sections.
-        #   * map_tokens gives the map ITS OWN budget: the sections keep the full
-        #     budget_tokens. That is the only form in which the arm with the map and
-        #     the arm without it differ by the map alone.
+        # Global envelope: map takes at most 30% of the total budget.
         map_text = ""
         map_budget_chars = 0
         map_stats: Dict[str, Any] = {}
         if map_tokens is not None and map_tokens > 0:
-            map_budget_chars = max(0, int(map_tokens * self.CHARS_PER_TOKEN))
+            map_budget_chars = max(0, int(map_tokens * chars_per_token))
         elif map_ratio > 0:
-            map_budget_chars = int(budget_chars * min(1.0, map_ratio))
+            effective_map_ratio = min(0.3, map_ratio)
+            map_budget_chars = int(total_budget_chars * effective_map_ratio)
         if map_budget_chars > 0:
             if map_detail == "structure":
                 map_text, map_stats = self._structure_map_text(map_budget_chars, query, limit)
             else:
                 map_text = self._project_map_text(map_budget_chars)
-            if map_text and (map_tokens is None or map_tokens <= 0):
-                # Historical form: the map is taken off the top of the section budget.
-                budget_chars = max(400, budget_chars - len(map_text) - 1)
-        total_budget_chars = budget_chars + map_budget_chars
+            if map_text:
+                # Sections retain at least 70% of the requested budget.
+                budget_chars = max(int(total_budget_chars * 0.7), total_budget_chars - len(map_text) - 1)
+
         # Widened candidate search: when max_entries_per_file is active, top-scoring files
         # with many sections would starve other files if search_limit is too small.
         # SQLite FTS5 search over 1000 items takes < 5ms.
@@ -442,48 +441,74 @@ class ContextBuilder:
         used = 0
         breadth_chars = int(budget_chars * max(0.0, min(1.0, breadth_ratio)))
 
-        # Phase 1: cover as many relevant elements as possible, cheaply (level 0).
-        for item in scored:
-            key = (item.get("kind", ""), item["ref_id"])
-            if key in entries:
-                continue
-            rendered_entry = self.render(key[0], key[1], 0)
-            if rendered_entry is None:
-                continue
-            text, _extra = rendered_entry
-            cost = len(text) + 1
-            if used + cost > breadth_chars:
-                break
-            used += cost
-            entries[key] = ContextEntry(key[0], key[1], 0, float(item.get("score", 0.0)), text)
-            order.append(key)
-
-        # Phase 2: deepen the highest-ranked elements while the budget allows.
-        for level in range(1, max_level + 1):
-            for key in order:
-                entry = entries[key]
-                if entry.level >= level:
+        if breadth_ratio <= 0.0:
+            # Depth-first direct: bypass breadth phase, directly deepen top candidates up to max_level
+            for item in scored:
+                key = (item.get("kind", ""), item["ref_id"])
+                if key in entries:
                     continue
-                if tiering.enabled and entry.score < tiering.deepen_min_score and level > tiering.low_tier_max_level:
+                # Try levels from max_level down to 0
+                for lvl in range(max_level, -1, -1):
+                    if tiering.enabled and float(item.get("score", 0.0)) < tiering.deepen_min_score and lvl > tiering.low_tier_max_level:
+                        continue
+                    rendered_entry = self.render(key[0], key[1], lvl, max_chars=max_content_chars)
+                    if rendered_entry is None:
+                        continue
+                    text, extra = rendered_entry
+                    cost = len(text) + 1
+                    if used + cost <= budget_chars:
+                        used += cost
+                        entry = ContextEntry(key[0], key[1], lvl, float(item.get("score", 0.0)), text)
+                        entry.content_hash = extra.get("content_hash")
+                        entry.line_count = extra.get("line_count")
+                        entries[key] = entry
+                        order.append(key)
+                        break
+                if used >= budget_chars:
+                    break
+        else:
+            # Phase 1: cover as many relevant elements as possible, cheaply (level 0).
+            for item in scored:
+                key = (item.get("kind", ""), item["ref_id"])
+                if key in entries:
                     continue
-                rendered_entry = self.render(entry.kind, entry.ref_id, level, max_chars=max_content_chars)
+                rendered_entry = self.render(key[0], key[1], 0)
                 if rendered_entry is None:
                     continue
-                text, extra = rendered_entry
-                delta = len(text) - len(entry.text)
-                if delta <= 0:
+                text, _extra = rendered_entry
+                cost = len(text) + 1
+                if used + cost > breadth_chars:
+                    break
+                used += cost
+                entries[key] = ContextEntry(key[0], key[1], 0, float(item.get("score", 0.0)), text)
+                order.append(key)
+
+            # Phase 2: deepen the highest-ranked elements while the budget allows.
+            for level in range(1, max_level + 1):
+                for key in order:
+                    entry = entries[key]
+                    if entry.level >= level:
+                        continue
+                    if tiering.enabled and entry.score < tiering.deepen_min_score and level > tiering.low_tier_max_level:
+                        continue
+                    rendered_entry = self.render(entry.kind, entry.ref_id, level, max_chars=max_content_chars)
+                    if rendered_entry is None:
+                        continue
+                    text, extra = rendered_entry
+                    delta = len(text) - len(entry.text)
+                    if delta <= 0:
+                        entry.level = level
+                        entry.text = text
+                        entry.content_hash = extra.get("content_hash")
+                        entry.line_count = extra.get("line_count")
+                        continue
+                    if used + delta > budget_chars:
+                        continue
+                    used += delta
                     entry.level = level
                     entry.text = text
                     entry.content_hash = extra.get("content_hash")
                     entry.line_count = extra.get("line_count")
-                    continue
-                if used + delta > budget_chars:
-                    continue
-                used += delta
-                entry.level = level
-                entry.text = text
-                entry.content_hash = extra.get("content_hash")
-                entry.line_count = extra.get("line_count")
 
         ordered = sorted(entries.values(), key=lambda entry: entry.score, reverse=True)
         rendered: List[Dict[str, Any]] = []
@@ -510,20 +535,27 @@ class ContextBuilder:
         wire_chars = len(json.dumps({"entries": rendered}, ensure_ascii=False)) if rendered else 0
         text_chars = len(text_block)
         deepest = sum(1 for entry in rendered if entry["level"] >= 3)
+        if format == "json":
+            entries_tokens = int(wire_chars / self.CHARS_PER_TOKEN_JSON) if wire_chars else 0
+            map_tokens_est = int(len(map_text) / self.CHARS_PER_TOKEN_JSON) if map_text else 0
+            used_tokens_estimate = entries_tokens + map_tokens_est
+            json_tokens_estimate = entries_tokens
+        else:
+            used_tokens_estimate = int(text_chars / self.CHARS_PER_TOKEN)
+            json_tokens_estimate = int(wire_chars / self.CHARS_PER_TOKEN_JSON) if wire_chars else 0
         return {
             "query": query,
             "budget_tokens": budget_tokens,
-            # `used_tokens_estimate` describes the default (text) payload; the
-            # JSON variant of the same content is reported separately because it
-            # costs ~29% more tokens for identical information.
-            "used_tokens_estimate": int(text_chars / self.CHARS_PER_TOKEN),
-            "json_tokens_estimate": int(wire_chars / self.CHARS_PER_TOKEN),
+            # `used_tokens_estimate` describes the actual payload (text or JSON);
+            # the JSON variant of the same content is also reported separately.
+            "used_tokens_estimate": used_tokens_estimate,
+            "json_tokens_estimate": json_tokens_estimate,
             "budget_fill_ratio": round(text_chars / total_budget_chars, 4) if total_budget_chars else 0.0,
             "entry_count": len(rendered),
             "full_content_count": deepest,
             "map_chars": len(map_text),
             "map_budget_chars": map_budget_chars,
-            "map_tokens": int(map_budget_chars / self.CHARS_PER_TOKEN),
+            "map_tokens": int(map_budget_chars / chars_per_token),
             # A partial tree is not a map: the reader cannot tell what was kept
             # or dropped. Exposed so a caller can refuse to run on one.
             "map_truncated": "[carte tronquee" in map_text,
