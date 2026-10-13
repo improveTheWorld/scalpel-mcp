@@ -121,3 +121,20 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
 * **Correction du contrat `search_documents`** : Suppression de `"required": ["query"]` dans `toolset_schemas.py` et levée de la troncature silencieuse à 8 documents sur requête vide.
 * **Suppression du message d'erreur circulaire** : Dans `toolsets.py` (`_plain_tool_error`), suppression de la consigne toxique *"find it with search_documents"* en cas de panne de l'outil.
 * **Validation unitaire** : 625/625 tests passés avec succès (`test_search_documents_robustness.py`).
+
+## 8. Chantier Efficacite Agent : Reduction de la Friction sur la Lecture et l'Ecriture Groupees
+
+Ce chantier repond au constat empirique mesure sur les sessions DSH et le banc d'evaluation : les agents sous-utilisent la lecture groupee (paths=[...]) et evitent l'ecriture groupee (edits=[...]), preferant un mode sequentiel precautionneux qui multiplie les tours d'agent (2 a 5 s de paroi par tour) et alourdit l'historique de conversation.
+
+### A. Incitation et fluidification de la lecture groupee (paths=[...]) -- S2 / Fort Impact
+* **Constat** : Apres un read_block sur un fichier qui liste les symboles, l'agent effectue souvent plusieurs read_block sequentiels au lieu de demander les 2 ou 3 symboles d'interet en un seul appel.
+* **Pistes d'amelioration** :
+  1. **Contrat & Guidage** : Expliciter dans le prompt de demarrage qu'apres identification des symboles d'un fichier, l'agent doit de preference passer par read_block(paths=['file::f1', 'file::f2']).
+  2. **Indice d'action dans le retour de listing** : Quand read_block renvoie un listing de membres de code ou de sections Markdown, inclure un hint d'appel compact (ex: 'Call read_block(paths=[...]) to read multiple members in one turn').
+
+### B. Simplification et securisation de l'ecriture multi-blocs -- S2 / Ergonomie
+* **Constat** : edit_block(edits=[...]) est percu comme risque par les agents en raison de la dependance stricte aux hashes (expected_hash) et de la politique tout-ou-rien (ALL-OR-NOTHING). Tout decalage ou syntaxe invalide sur un bloc fait echouer l'ensemble du lot, ce qui pousse l'agent vers un comportement sequentiel minimax.
+* **Pistes d'amelioration** :
+  1. **Support fluide du multi-tool calling natif** : Documenter et optimiser la prise en charge d'appels edit_block paralleles distincts dans la meme reponse de l'agent (pour des fichiers independants), alternative plus naturelle pour les modeles que l'objet imbrique edits=[...].
+  2. **Tolerance aux ecritures multi-blocs dans le meme fichier** : Faciliter le rebase automatique d'AST en tolerante que des modifications successives sur des blocs freres ou enfants du meme fichier partagent le hash de depart sans exiger un recalcul mental intermediaire du hash pour chaque operation.
+  3. **Diagnostic enrichi en cas de refus** : Ameliorer les messages de conflit de rebase pour indiquer directement le patch ou le hash actualise attendu.
