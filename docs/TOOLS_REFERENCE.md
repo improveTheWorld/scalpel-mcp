@@ -80,8 +80,10 @@ Applies surgical, line-based operations to an existing block without invoking fu
 
 #### Guarantees and Rules
 * **Bottom-Up Application**: Operations are applied in descending line order so line numbers remain stable during execution.
-* **Outline Invariance**: Headings of equal or higher hierarchy cannot be injected via `edit_block`. Reshaping document structure requires `insert_block`.
-* **Sibling Creation**: Appending content after the final line of a code block writes outside the block as a sibling declaration.
+* **Markdown Line Coordinates & `insert_after: 0` vs `1`**: In Markdown, **line 1 is the heading** (`# Heading`). `insert_after: 0` lands *before* line 1 (before the title), which places the content above the section. To insert content at the very start of the section's body (under its title), use `insert_after: 1`.
+* **Outline Invariance & Sibling Sections**: `edit_block` strictly modifies *inside* the block. Inserting a heading of equal or higher hierarchy is refused; to add sibling sections or paragraphs, use `insert_block(parent, anchor)` directly.
+* **Sibling Creation in Code**: Appending content after the final line of a code block writes outside the block as a sibling declaration.
+* **Inclusive Replace Ranges**: `replace: [a, b]` consumes every line from `a` to `b` inclusive. Ensure adjacent bullets or lines intended to be kept are not included in `[a, b]`.
 * **Batch Atomicity**: A syntax validation failure on any entry in `edits=[...]` rejects the entire batch; no file writes occur, and existing hashes remain valid.
 
 ---
