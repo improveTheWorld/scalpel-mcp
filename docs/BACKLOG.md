@@ -139,6 +139,12 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
   * **Immunisation contre la limite physique `SQLITE_MAX_VARIABLE_NUMBER`** : La clause `WHERE id IN (...)` de `search_documents` est automatiquement découpée en blocs de 900 paramètres.
   * **Isolation défensive du cache Markdown** : `_get_markdown_layout` retourne des copies superficielles de dictionnaires, interdisant toute corruption du cache partagé par mutation de référence.
   * **Couverture de résistance** : 28 stress-tests créés dans `tests/test_stress_lots_1_and_2.py` (total : 659 tests unitaires et de stress, 100% PASS).
+* **Refonte & Optimisation Complète de `build_context` (Lots 1 à 4 validés - 13/10/2026)** :
+  * **Lot 1 (Enveloppe budgétaire globale & Calibration JSON)** : Plafonnement de `map` à 30 % du budget total demandé ; suppression de la duplication de 50 % de tokens dans le format JSON (`payload["context"]` retiré) ; calibration à 1.3 chars/token en JSON ; sécurisation de `breadth_ratio=0.0` (depth-first direct).
+  * **Lot 2 (Performance & Latence divisée par 15)** : Latence ramenée de 2,9 s (et 12 s sur gros dépôts) à **< 100 ms** (88 ms mesuré) via *Single-Pass Deepening*, caches éphémères de cycle de vie (`_entity_cache`, `_file_bytes_cache`) et résolution d'adresses groupée anti-N+1 (`_batch_resolve_printed_refs`).
+  * **Lot 3 (Hygiène de l'Index & Pondération Sémantique Anti-Bruit)** : Exclusion par défaut de `reports/`, `transcripts/`, `benchmarks/results/` ; modulation sémantique BM25 boostant le code source applicatif (x1.5) devant les sections doc (x1.0) et les propriétés JSON (x0.3) ; diversité préservée par `max_entries_per_file = 5` par défaut.
+  * **Lot 4 (Restitution Élégante au Niveau 3 - Graceful Truncation)** : Découpage strict aux frontières de lignes (`\n`) évitant les identifiants tronqués ; notice explicite avec ratio de lignes affichées (`K/N lines shown`) et invitation à utiliser `read_block`.
+  * **Validation globale** : 682/682 tests pytest réussis (100% PASS, 0 régression).
 
 ## 8. Chantier Efficacité Agent : Réduction de la Friction sur la Lecture et l'Écriture Groupées
 
