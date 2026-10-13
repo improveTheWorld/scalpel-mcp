@@ -110,7 +110,19 @@ SCALPEL_SCHEMAS: List[Dict[str, Any]] = [
         "function": {
             "name": "insert_block",
             "description": "Insert a new block as a CHILD of a parent block, and return the state of the block you just made: its id, its numbered text and its hash -- so the next call needs no read_block and no guess. This is the ONLY way to add a paragraph: edit_block never touches the outline. parent is the block that receives the child, written as a PATH like every other name here: a document path means the document itself, whose children are its top-level sections, a paragraph path (guide.md::Section mere::Paragraphe) means that paragraph, a code path (T.cs::Classe::Methode) means that symbol, and a DIRECTORY path CREATES the child, whose name is the FIRST LINE of text (a trailing slash on that name makes a directory -- the name carries the type, no other field does). A file or a directory created this way is removed OUTSIDE the tools: nothing on this surface deletes one.. anchor is OPTIONAL: omit it to insert as the FIRST child -- in a document that means ABOVE its current first section, and since the level comes from the parent a '##' written there is written as '#' -- or pass the id of one of its children to place the new block right after it AND everything that child holds (a container owns its whole subtree); under a directory, whose children are ordered by name, omit it. text is the new block: its FIRST LINE is the title, or under a directory the name of the file or directory to create, the rest is the body, or the file content. The level (one deeper than the parent) and the number (from the children around it) are the tool business: a leading # marker on the title is accepted and dropped. Refused if the placement or the title would contradict the tree.",
-            "parameters": {"type": "object", "properties": {"parent": {"type": "string", "description": "Block that receives the child, as a path: a document, a paragraph (guide.md::Section mere::Paragraphe), a code symbol (T.cs::Classe::Methode), or a DIRECTORY, which CREATES the child inside it."}, "anchor": {"type": "string", "description": "Optional. Omit it to insert FIRST; otherwise the id of a child of parent to insert right after it AND after everything that child holds (a container owns its whole subtree)."}, "text": {"type": "string", "description": "The new block: first line = title (under a directory, the name of the file or directory to create), rest = body."}}, "required": ["parent", "text"]},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "parent": {"type": "string", "description": "Block that receives the child, as a path: a document, a paragraph (guide.md::Section mere::Paragraphe), a code symbol (T.cs::Classe::Methode), or a DIRECTORY, which CREATES the child inside it."},
+                    "anchor": {"type": "string", "description": "Optional. Omit it to insert FIRST; otherwise the id of a child of parent to insert right after it AND after everything that child holds (a container owns its whole subtree)."},
+                    "text": {"type": "string", "description": "The new block: first line = title (under a directory, the name of the file or directory to create), rest = body."},
+                    "inserts": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "SEVERAL blocks in ONE call: a list of {parent, anchor, text} objects, applied in the order given. A parent given at the top level beside inserts is USED as default when an entry omits parent. Omit parent and text at top level when every entry in inserts carries its own.",
+                    },
+                },
+            },
         },
     },
 ]

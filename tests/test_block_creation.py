@@ -281,3 +281,124 @@ def test_insert_block_preserves_trailing_newline_in_content(tmp_path: Path) -> N
     assert written2 == content_no_nl.encode("utf-8")
     assert not written2.endswith(b"\n")
 
+
+def test_insert_block_batch_same_parent_top_level_and_per_entry(tmp_path: Path) -> None:
+    """insert_block(inserts=[...]) inserts multiple methods under the same class."""
+    import asyncio
+    import json
+    from ast_graph_server.server import ASTGraphServer
+
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "a.py").write_text("class A:\n    def existing(self):\n        return 0\n", encoding="utf-8")
+    config = ServerConfig(workspace_root=ws, db_path=ws / ".agent_graph.db")
+    server = ASTGraphServer(config)
+    server.initialize(enable_watcher=False)
+    try:
+        raw = asyncio.run(
+            server.mcp.call_tool(
+                "insert_block",
+                {
+                    "parent": "src/a.py::A",
+                    "inserts": [
+                        {"text": "def m1(self):\n    return 1\n"},
+                        {"parent": "src/a.py::A", "text": "def m2(self):\n    return 2\n"},
+                    ],
+                },
+            )
+        )
+        res = json.loads(raw.content[0].text)
+        assert res["status"] == "success", res
+        assert res["applied"] == 2
+        assert res["total"] == 2
+        assert len(res["results"]) == 2
+        assert all(r["status"] == "success" for r in res["results"])
+        code = (ws / "src" / "a.py").read_text(encoding="utf-8")
+        assert "def m1(self):" in code
+        assert "def m2(self):" in code
+    finally:
+        server.stop() if hasattr(server, "stop") else None
+
+
+def test_insert_block_batch_multi_parents_code_doc_and_directory(tmp_path: Path) -> None:
+    """insert_block(inserts=[...]) inserts into code, markdown, and directory in one call."""
+    import asyncio
+    import json
+    from ast_graph_server.server import ASTGraphServer
+
+    ws = tmp_path / "ws"
+    (ws / "docs").mkdir(parents=True)
+    (ws / "src").mkdir(parents=True)
+    (ws / "docs" / "existing.md").write_text("# Titre\n\ncorps\n", encoding="utf-8")
+    (ws / "src" / "a.py").write_text("class A:\n    pass\n", encoding="utf-8")
+    config = ServerConfig(workspace_root=ws, db_path=ws / ".agent_graph.db")
+    server = ASTGraphServer(config)
+    server.initialize(enable_watcher=False)
+    try:
+        raw = asyncio.run(
+            server.mcp.call_tool(
+                "insert_block",
+                {
+                    "inserts": [
+                        {"parent": "src/a.py::A", "text": "def added_method(self):\n    return 42\n"},
+                        {"parent": "docs/existing.md::Titre", "text": "Nouvelle Section\n\nContenu section."},
+                        {"parent": "src", "text": "new_module.py\nX = 99\n"},
+                    ],
+                },
+            )
+        )
+        res = json.loads(raw.content[0].text)
+        assert res["status"] == "success", res
+        assert res["applied"] == 3
+        assert res["total"] == 3
+        assert "def added_method(self):" in (ws / "src" / "a.py").read_text(encoding="utf-8")
+        assert "## Nouvelle Section" in (ws / "docs" / "existing.md").read_text(encoding="utf-8")
+        assert (ws / "src" / "new_module.py").read_text(encoding="utf-8") == "X = 99"
+    finally:
+        server.stop() if hasattr(server, "stop") else None
+
+
+def test_insert_block_batch_rejects_missing_parent_or_text_with_index(tmp_path: Path) -> None:
+    """insert_block(inserts=[...]) rejects entries missing parent or text and names the offending index."""
+    import asyncio
+    import json
+    from ast_graph_server.server import ASTGraphServer
+
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "a.py").write_text("class A:\n    pass\n", encoding="utf-8")
+    config = ServerConfig(workspace_root=ws, db_path=ws / ".agent_graph.db")
+    server = ASTGraphServer(config)
+    server.initialize(enable_watcher=False)
+    try:
+        raw_missing_text = asyncio.run(
+            server.mcp.call_tool(
+                "insert_block",
+                {
+                    "inserts": [
+                        {"parent": "src/a.py::A", "text": "def ok(self):\n    return 1\n"},
+                        {"parent": "src/a.py::A"},
+                    ],
+                },
+            )
+        )
+        res1 = json.loads(raw_missing_text.content[0].text)
+        assert res1["status"] == "error", res1
+        assert "1" in res1["error"] and "text" in res1["error"], res1
+
+        raw_missing_parent = asyncio.run(
+            server.mcp.call_tool(
+                "insert_block",
+                {
+                    "inserts": [
+                        {"text": "def no_parent(self):\n    return 1\n"},
+                    ],
+                },
+            )
+        )
+        res2 = json.loads(raw_missing_parent.content[0].text)
+        assert res2["status"] == "error", res2
+        assert "0" in res2["error"] and "parent" in res2["error"], res2
+    finally:
+        server.stop() if hasattr(server, "stop") else None
+

@@ -1281,6 +1281,7 @@ class Patcher:
             "bytes": size,
             "content_hash": compute_content_hash(file_bytes) if file_bytes is not None else None,
             "children": self._displayed_symbol_children(rows),
+            "actionable_hint": "Call read_block(paths=['" + block_id + "::sym1', ...]) to read multiple blocks in one turn.",
         }
 
     def _structured_summary(self, block_id: str, absolute: Path) -> Optional[Dict[str, Any]]:
@@ -1291,6 +1292,7 @@ class Patcher:
         they keep their names instead of being flattened into a uniform list.
         """
         suffix = absolute.suffix.lower()
+        file_bytes: Optional[bytes] = None
         try:
             file_bytes = absolute.read_bytes()
             line_count: Optional[int] = len(file_bytes.decode("utf-8", errors="replace").splitlines())
@@ -1334,7 +1336,16 @@ class Patcher:
                 data = json.loads(absolute.read_text(encoding="utf-8", errors="replace"))
             except Exception as error:
                 return self._summary_parse_refusal(block_id, suffix, str(error))
+            rows = self._symbol_rows(block_id)
             if not isinstance(data, dict):
+                if isinstance(data, list) and any(isinstance(item, dict) for item in data) and rows:
+                    payload["top_level_keys"] = [
+                        str(r["name"]) for r in rows if not r.get("parent_id")
+                    ][:100]
+                    payload["children"] = self._displayed_symbol_children(rows)
+                    if file_bytes is not None:
+                        payload["content_hash"] = compute_content_hash(file_bytes)
+                    return payload
                 return {
                     "status": "error", "id": block_id,
                     "error": (
@@ -1349,6 +1360,10 @@ class Patcher:
                 key: (list(value.keys())[:20] if isinstance(value, dict) else None)
                 for key, value in list(data.items())[:20]
             }
+            if rows:
+                payload["children"] = self._displayed_symbol_children(rows)
+                if file_bytes is not None:
+                    payload["content_hash"] = compute_content_hash(file_bytes)
             return payload
         if suffix in (".yaml", ".yml"):
             keys = []
@@ -1356,12 +1371,19 @@ class Patcher:
                 match = re.match(r"^([A-Za-z_][A-Za-z0-9_.\-]*):", line)
                 if match:
                     keys.append(match.group(1))
+            rows = self._symbol_rows(block_id)
+            if not keys and rows:
+                keys = [str(r["name"]) for r in rows if not r.get("parent_id")]
             payload["top_level_keys"] = keys[:100]
             payload["validated"] = False
             payload["note"] = (
                 "Keys are matched with a pattern, not read by a YAML parser: this summary "
                 "says what the file LOOKS like and does not certify that it is valid YAML."
             )
+            if rows:
+                payload["children"] = self._displayed_symbol_children(rows)
+                if file_bytes is not None:
+                    payload["content_hash"] = compute_content_hash(file_bytes)
             return payload
         return None
 
@@ -2049,7 +2071,7 @@ class Patcher:
                     # left the tool for search_documents and search_symbols.
                     absolute = self._existing_path(file_part)
                     summary = self._structured_summary(file_part, absolute) if absolute else None
-                    if summary is not None:
+                    if summary is not None and not self._symbol_rows(file_part):
                         # A structured file never declared a symbol: asserting one that
                         # "disappeared" would be a cause the code never checked.
                         return self._summary_key_refusal(file_part, summary)
@@ -2116,7 +2138,10 @@ class Patcher:
                 break
         if similar:
             return similar[:limit]
-        containers = {"namespace", "class", "interface", "struct", "record", "enum", "module", "trait"}
+        containers = {
+            "namespace", "class", "interface", "struct", "record", "enum", "module", "trait",
+            "mapping", "sequence", "object", "array", "property",
+        }
         roots = [
             row for row in rows
             if str(row.get("kind") or "") in containers
@@ -2251,7 +2276,9 @@ class Patcher:
     #: size instead of being handed a payload the harness would truncate anyway.
     RAW_FILE_MAX_BYTES = 512 * 1024
 
-    def _raw_text_payload(self, normalized: str, block_id: str) -> Optional[Dict[str, Any]]:
+    def _raw_text_payload(
+        self, normalized: str, block_id: str, allow_supported: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """The TEXT of a file no parser and no document reader claims, numbered, READ-ONLY.
 
         A file nobody claims used to be a dead end: the refusal said "this extension is neither"
@@ -2267,7 +2294,7 @@ class Patcher:
         """
         indexer = getattr(self, "indexer", None)
         supported = getattr(indexer, "_is_supported", None)
-        if supported is not None and supported(normalized):
+        if not allow_supported and supported is not None and supported(normalized):
             return None
         try:
             absolute = self.config.to_absolute_path(normalized)
@@ -2408,6 +2435,10 @@ class Patcher:
             )
             return payload
         if normalized in indexed:
+            if not self._symbol_rows(normalized):
+                raw = self._raw_text_payload(normalized, block_id, allow_supported=True)
+                if raw is not None:
+                    return raw
             payload["error"] = (
                 "'" + block_id + "' is indexed, but the parser recognised no container "
                 "(class, interface, namespace, struct, record or enum) in it, so there is no "
@@ -2423,7 +2454,9 @@ class Patcher:
         # A file NOBODY claims -- no parser, no document reader -- answers with its TEXT:
         # the refusal that used to stand here named the cause and left the caller with no
         # route at all (cf. _raw_text_payload).
-        raw = self._raw_text_payload(normalized, block_id)
+        raw = self._raw_text_payload(
+            normalized, block_id, allow_supported=not self._symbol_rows(normalized)
+        )
         if raw is not None:
             return raw
         payload["error"] = (

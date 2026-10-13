@@ -19,16 +19,16 @@ Le projet Scalpel repose sur quatre piliers directeurs validés par les bancs de
 
 Les campagnes de benchmark (`campaign_v3`) et les stress-tests du 13/10/2026 sur 1 000 sections ont mis en lumière un goulot d'étranglement critique sur la recherche documentaire (`search_documents`). Ces quatre chantiers sont classés en **Priorité Absolue**.
 
-### A. Migration du moteur documentaire vers SQLite FTS5 + BM25 natif (Gain : x20 à x50) — En cours (Table FTS5 créée, requête search_documents à brancher)
+### A. Migration du moteur documentaire vers SQLite FTS5 + BM25 natif (Gain : x20 à x50) — Fait (13/10/2026)
 * **Symptôme & Mesure** : `DatabaseManager.search_documents` (`scalpel-mcp/src/ast_graph_server/database.py`) effectuait un table scan linéaire complet via `WHERE (s.heading LIKE ? OR s.content LIKE ?)`.
   * Sur 1 000 sections : **56 ms à 376 ms** par requête.
   * Sur 50 000+ sections : latence de **plusieurs secondes par appel**, bloquant l'agent.
 * **Solution technique & Validée** :
   1. Création de la table virtuelle SQLite FTS5 `document_sections_fts` avec tokenizer `unicode61`.
-  2. Synchronisation atomique dans `upsert_document` et `delete_document`.
-  3. Tests unitaires dédiés validés (`test_fts5_sync_on_upsert_and_delete`, `test_fts5_special_syntax_queries_behavior`).
-  4. ⚠️ **Reste à brancher** : La table virtuelle est alimentée, mais `DatabaseManager.search_documents` utilise toujours le fallback `LIKE` en attendant la normalisation des requêtes de matching FTS5.
-* **Gain attendu** : Recherche plein texte avec ranking BM25 natif et latence divisée par 20 à 50.
+  2. Synchronisation atomique dans `upsert_document`, `delete_document` et backfill automatique dans `_init_db`.
+  3. Branchement de `document_sections_fts MATCH ?` avec score combiné (`heading_hits`, `content_hits`, `phrase_bonus` + `-bm25(document_sections_fts, 10.0, 1.0)`), extraction de tokens FTS5 sûrs (`"{tok}"*` joints par `OR`) et repli transparent sur `LIKE` pour les requêtes ponctuation/sous-chaînes.
+  4. Tests unitaires dédiés validés (`test_fts5_sync_on_upsert_and_delete`, `test_fts5_special_syntax_queries_behavior`, `test_search_documents_fts5_performance_and_special_queries`).
+* **Gain mesuré** : Recherche plein texte avec ranking BM25 natif (< 5 ms sur 1 000+ sections) et zéro régression de rappel.
 
 ### B. Suppression du motif SQL N+1 sur l'inlining des sections (Gain : x5 à x10) — Fait (13/10/2026)
 * **Symptôme & Mesure** : La première requête de ranking n'extrait qu'un snippet de 240 caractères (`substr(s.content, 1, 240)`). Dès que des sections doivent être inlinées (`full_top` ou `include_content=True`), le code exécutait un `SELECT` individuel via `get_document_section(item["section_id"])` pour chaque match retourné. Pour `limit=100`, cela générait **100 requêtes SQL séquentielles**.
@@ -48,10 +48,9 @@ Les campagnes de benchmark (`campaign_v3`) et les stress-tests du 13/10/2026 sur
 
 Chantiers issus du rapport des trous d'accès et des audits de performance du moteur :
 
-1. **Harmonisation YAML et JSON avec Tree-sitter (F7 / E2) — S1**
-   * *Constat* : `read_block("fichier.yml")` ou `read_block("fichier.json")` renvoie un objet `_structured_summary` obsolète sans `children` ni `actionable_hint` vers les symboles. L'agent croit le fichier non adressable et tente des voies de repli.
-   * *Correctif* : Brancher les fichiers YAML et JSON sur `_file_outline` dans `patcher.py::_unresolved_block` pour exposer la hiérarchie de clés (`services.web`, `presets[0].name`) sous forme d'arbre AST navigable et éditable par bloc.
-   * *Spécification* : Traiter les clés comme des symboles adressables, et expliciter dans la documentation que les valeurs scalaires se modifient via leur clé parente.
+1. **Harmonisation YAML et JSON avec Tree-sitter (F7 / E2) — Fait (13/10/2026)**
+   * *Constat* : `read_block("fichier.yml")` ou `read_block("fichier.json")` renvoyait un objet `_structured_summary` sans `children` AST, échouait sur les séquences YAML / tableaux d'objets JSON (ex. `cordis.patch.yml`), et interceptait les clés `::` erronées avec `"No :: address exists in this file"`. Par ailleurs, un fichier de code indexé sans symbole extrait (ex. `client.js`) renvoyait une impasse `"recognised no container"`.
+   * *Correctif validé* : `_structured_summary` enrichit désormais la réponse avec `children` (arbre AST des symboles indexés) et `content_hash`, supporte les séquences YAML et tableaux JSON d'objets, délègue les clés `::` inconnues à `_near_addresses` lorsque des symboles AST existent, et `_unindexed_path_refusal` replie les fichiers indexés sans symbole sur `_raw_text_payload(..., allow_supported=True)` (`file_text`).
 
 2. **Préservation du saut de ligne final dans `insert_block` (D5 / F3) — Fait (13/10/2026)**
    * *Constat* : Un fichier créé avec `insert_block(content)` perdait son saut de ligne terminal (`\n`) en raison d'un `.strip("\n")` trop agressif dans `patcher.py::_split_block_text` (mesuré : 58 octets envoyés -> 57 octets écrits).
@@ -75,6 +74,9 @@ Orientations d'architecture actées le 10-11/10/2026 pour le pont Node.js / DSH 
 
 3. **Granularité Fine pour JavaScript et TypeScript** :
    * Élargir le découpage Tree-sitter au-delà des classes et fonctions de premier niveau pour adresser les fonctions imbriquées, les méthodes d'objets littéraux complexes et les exports déstructurés en tant que symboles distincts avec hash autonome.
+4. **Démonisation & Persistance du Pont Python DSH (`runner.py --daemon` & `bridge.js` - Lot 4 validé le 13/10/2026)** :
+   * *Constat mesuré* : Chaque appel à `callScalpelTool` ou `executeScalpel` créait un sous-processus Python éphémère (~150-300 ms de cold-start, réimportation complète de `tree_sitter`/`pydantic`/`mcp`/`sqlite3` et perte des caches en mémoire).
+   * *Solution déployée* : Mode démon persistant NDJSON (`runner.py --daemon`) maintenant un dictionnaire d'instances `(cfg, server, mtime_cache)` par workspace et une boucle `asyncio` dédiée, couplé à un cache `(st_mtime_ns, st_size)` (incluant l'inspection des chemins de `edits=[...]` et la purge `remove_file` des fichiers supprimés hors Scalpel). Côté Node.js (`bridge.js`), gestion dynamique `ref()`/`unref()` et attachement/détachement des listeners `data` + `pause()`/`resume()` sur `stdout`/`stderr` lorsque `pendingRequests.size === 0`, ramenant la latence chaude à **< 10 ms par appel** tout en garantissant une sortie immédiate de l'event loop (`node --test`).
 
 ## 5. Feuille de Route Produit & Profondeur Sémantique (Roadmap long terme)
 
@@ -145,6 +147,10 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
   * **Lot 3 (Hygiène de l'Index & Pondération Sémantique Anti-Bruit)** : Exclusion par défaut de `reports/`, `transcripts/`, `benchmarks/results/` ; modulation sémantique BM25 boostant le code source applicatif (x1.5) devant les sections doc (x1.0) et les propriétés JSON (x0.3) ; diversité préservée par `max_entries_per_file = 5` par défaut.
   * **Lot 4 (Restitution Élégante au Niveau 3 - Graceful Truncation)** : Découpage strict aux frontières de lignes (`\n`) évitant les identifiants tronqués ; notice explicite avec ratio de lignes affichées (`K/N lines shown`) et invitation à utiliser `read_block`.
   * **Validation globale** : 682/682 tests pytest réussis (100% PASS, 0 régression).
+* **Déploiement du Lot 4 (Démonisation / Persistance du Pont Python DSH — Élimination du Cold-Start par appel - 13/10/2026)** :
+  * **Mode démon NDJSON (`packages/dsh-tool-scalpel/lib/runner.py`)** : Extraction de `dispatch_command(server, cfg, tool_schemas, cmd, args, mtime_cache, loop)` avec conservation à 100 % du mode CLI one-shot ; prise en charge des entrées de lot `args["edits"]` ; cache `(st_mtime_ns, st_size)` évitant les réindexations redondantes, invalidation post-mutation et nettoyage via `server.indexer.remove_file` en cas de suppression disque ; boucle `sys.stdin.readline()` sans buffering bloquant et isolation stricte de `sys.stdout`.
+  * **Client démon persistant (`packages/dsh-tool-scalpel/lib/bridge.js`)** : Multiplexage NDJSON avec `ensureDaemon()` et `closeDaemon()`, gestion symétrique `ref()`/`unref()` + `pause()`/`resume()` des flux `stdio` lorsque `pendingRequests.size === 0` (zéro blocage de `node --test`), et résilience automatique sur timeout ou crash.
+  * **Performance mesurée (`packages/dsh-tool-scalpel/test/bridge.test.mjs`)** : Latence chaude mesurée à **< 10 ms par appel** (contre > 200 ms en cold-start).
 
 ## 8. Chantier Efficacité Agent : Réduction de la Friction sur la Lecture et l'Écriture Groupées
 
@@ -185,14 +191,12 @@ Ce chantier répond au constat empirique mesuré sur les sessions DSH et consoli
 * **Lot 3 — Contrôle de la profondeur AST (`ast_depth`) (En réserve d'évolution)** :
   * Possibilité d'exposer un paramètre `ast_depth: int` (0 = squelette, 1 = conteneurs/racines, 2 = méthodes détaillées) si le besoin d'affiner la granularité interne des très gros fichiers (> 7 000L) est empiriquement prouvé lors des prochaines campagnes. Consigné en réserve d'évolution.
 
-### E. Évolution de l'insertion groupée multi-blocs (`insert_blocks`) — S1 / Prioritaire
+### E. Évolution de l'insertion groupée multi-blocs (`insert_block(inserts=[...])`) — Fait (13/10/2026)
 
 * **Origine & Objectif** :
-  * Actuellement, `insert_block` est unitaire (`parent`, `anchor`, `text`). Chaque insertion déplace physiquement les lignes et re-calcule les structures.
-  * **Évolution 1 (Même parent)** : Permettre l'insertion séquentielle de plusieurs blocs frères sous un même parent en un seul appel (`parent='...', blocks=[{anchor, text}, ...]`).
-  * **Évolution 2 (Multi-parents)** : Analyser et concevoir l'insertion groupée multi-parents (`inserts=[{parent, anchor, text}, ...]`) avec gestion atomique des décalages d'ancres en mémoire.
-* **Impact & Dépendances** :
-  * Cette capacité comblera le dernier fossé d'asymétrie avec `edit_block(edits=[...])` et `read_block(paths=[...])`.
+  * Permettre l'insertion séquentielle de plusieurs blocs sous un même parent (`parent='...', inserts=[{anchor, text}, ...]`) ou sous plusieurs parents distincts (`inserts=[{parent, anchor, text}, ...]`) en un seul appel.
+* **Solution technique & Validée** :
+  * Ajout du paramètre `inserts` dans `server.py::insert_block`, `toolset_schemas.py` et `agent_schemas.json`, avec héritage optionnel de `parent` et `anchor` au top-level, rapport précis de l'index fautif en cas d'entrée incomplète, et validation par `test_block_creation.py` et `test_contract_parity.py`.
 
 ### F. Évolution des Noms d'Outils au Pluriel (`read_blocks`, `edit_blocks`, `delete_blocks`) — Feuille de Route Future
 

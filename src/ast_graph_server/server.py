@@ -1131,8 +1131,8 @@ class ASTGraphServer:
             ),
         )
         async def insert_block(
-            parent: str = Field(
-                ...,
+            parent: Optional[str] = Field(
+                default=None,
                 description=(
                     "Block that receives the child, as a path: a document, a paragraph "
                     "(guide.md::Section mere::Paragraphe), a code symbol (T.cs::Classe::Methode), or a "
@@ -1147,45 +1147,117 @@ class ASTGraphServer:
                     "as the FIRST child."
                 ),
             ),
-            text: str = Field(
-                ...,
+            text: Optional[str] = Field(
+                default=None,
                 description=(
                     "The new block: first line = title (and, under a directory, the name of the file "
                     "or directory to create), rest = body."
                 ),
             ),
+            inserts: Optional[List[Dict[str, Any]]] = Field(
+                default=None,
+                description=(
+                    "SEVERAL blocks in ONE call: a list of {parent, anchor, text} objects, applied "
+                    "in the order given. A parent given at the top level beside inserts is USED as "
+                    "default when an entry omits parent. Omit parent and text at top level when "
+                    "every entry in inserts carries its own."
+                ),
+            ),
         ) -> Dict[str, Any]:
-            # La NATURE du parent decide de la syntaxe : sous un fichier de code (ou un symbole, car un
-            # symbole est un bloc comme un autre), le texte est du C# et passe par la machinerie des
-            # symboles ; sous un document ou un dossier, c est un bloc Markdown ou un fichier.
-            external = self._external_entries(parent)
-            if external:
-                return self._external_refusal("insert_block", parent, external)
-            head = parent.split("::", 1)[0].split("#", 1)[0]
-            # A DIRECTORY is decided on the FILE SYSTEM first, never on the shape of its name:
-            # Path('a/DataLinq.Framework.SparkQuery').suffix is '.SparkQuery', so the name test
-            # sent the creation of a file inside that directory to the SYMBOL machinery, which
-            # read the DIRECTORY as a source file and raised PermissionError [Errno 13] -- an
-            # internal failure whose own text says "this is NOT a parameter problem, your
-            # arguments were accepted", so the agent retried three times and worked around it
-            # while nothing was ever created (run 2 of the base 9ef860f).
-            is_document = head.lower().endswith((".md", ".markdown"))
-            known = self.patcher._existing_path(head)
-            is_folder = bool(parent.endswith("/") or (known is not None and known.is_dir()))
-            if known is None and not is_folder:
-                # A path that is not on disk is a code file only when a PARSER claims it: a
-                # folder is what everything else designates, and it is the branch that can
-                # still refuse cleanly.
-                is_folder = not self._designates_a_code_file(head)
-            if not is_document and not is_folder:
+            def _insert_one(
+                one_parent: str,
+                one_anchor: Optional[str],
+                one_text: str,
+                one_content: Optional[str] = None,
+            ) -> Dict[str, Any]:
+                # La NATURE du parent decide de la syntaxe : sous un fichier de code (ou un symbole, car un
+                # symbole est un bloc comme un autre), le texte est du C# et passe par la machinerie des
+                # symboles ; sous un document ou un dossier, c est un bloc Markdown ou un fichier.
+                external = self._external_entries(one_parent)
+                if external:
+                    return self._external_refusal("insert_block", one_parent, external)
+                head = one_parent.split("::", 1)[0].split("#", 1)[0]
+                # A DIRECTORY is decided on the FILE SYSTEM first, never on the shape of its name:
+                # Path('a/DataLinq.Framework.SparkQuery').suffix is '.SparkQuery', so the name test
+                # sent the creation of a file inside that directory to the SYMBOL machinery, which
+                # read the DIRECTORY as a source file and raised PermissionError [Errno 13] -- an
+                # internal failure whose own text says "this is NOT a parameter problem, your
+                # arguments were accepted", so the agent retried three times and worked around it
+                # while nothing was ever created (run 2 of the base 9ef860f).
+                is_document = head.lower().endswith((".md", ".markdown"))
+                known = self.patcher._existing_path(head)
+                is_folder = bool(one_parent.endswith("/") or (known is not None and known.is_dir()))
+                if known is None and not is_folder:
+                    # A path that is not on disk is a code file only when a PARSER claims it: a
+                    # folder is what everything else designates, and it is the branch that can
+                    # still refuse cleanly.
+                    is_folder = not self._designates_a_code_file(head)
+                if not is_document and not is_folder:
+                    return self.patcher.unify_addresses(
+                        self.patcher.insert_symbol(parent_id=one_parent, code=one_text, anchor=one_anchor),
+                        used=[one_parent, one_anchor],
+                    )
                 return self.patcher.unify_addresses(
-                    self.patcher.insert_symbol(parent_id=parent, code=text, anchor=anchor),
-                    used=[parent, anchor],
+                    self.patcher.insert_block(
+                        parent_id=one_parent, where=one_anchor, text=one_text, content=one_content
+                    ),
+                    used=[one_parent, one_anchor],
                 )
-            return self.patcher.unify_addresses(
-                self.patcher.insert_block(parent_id=parent, where=anchor, text=text),
-                used=[parent, anchor],
-            )
+
+            if inserts is not None:
+                if not isinstance(inserts, list) or len(inserts) == 0:
+                    return {
+                        "status": "error",
+                        "error": "insert_block refused the call: 'inserts' must be a non-empty list of {parent, anchor, text} objects.",
+                    }
+                results: List[Dict[str, Any]] = []
+                for idx, item in enumerate(inserts):
+                    if not isinstance(item, dict):
+                        return {
+                            "status": "error",
+                            "error": f"insert_block refused the call: entry {idx} of 'inserts' must be an object with 'parent' and 'text'.",
+                        }
+                    item_parent = item.get("parent") or parent
+                    item_anchor = item.get("anchor") if "anchor" in item else anchor
+                    item_text = item.get("text")
+                    item_content = item.get("content") if "content" in item else None
+                    if not item_parent or item_text is None:
+                        missing_fields = [
+                            name
+                            for name, missing in (("parent", not item_parent), ("text", item_text is None))
+                            if missing
+                        ]
+                        return {
+                            "status": "error",
+                            "entry_index": idx,
+                            "error": (
+                                f"entry {idx} of inserts is missing {', '.join(missing_fields)}: "
+                                "each entry must provide 'text' and 'parent' (or inherit top-level 'parent')."
+                            ),
+                        }
+                    res = _insert_one(
+                        str(item_parent),
+                        str(item_anchor) if item_anchor is not None else None,
+                        str(item_text),
+                        str(item_content) if item_content is not None else None,
+                    )
+                    results.append(res)
+                applied = sum(1 for r in results if r.get("status") == "success")
+                return {
+                    "status": "success" if applied == len(results) else ("partial" if applied > 0 else "error"),
+                    "applied": applied,
+                    "total": len(results),
+                    "results": results,
+                }
+            if not parent or text is None:
+                return {
+                    "status": "error",
+                    "error": (
+                        "insert_block requires either ('parent' and 'text') for a single insertion "
+                        "or 'inserts=[...]' for a batch of insertions."
+                    ),
+                }
+            return _insert_one(parent, anchor, text)
 
         @self.mcp.tool(
             name="delete_block",

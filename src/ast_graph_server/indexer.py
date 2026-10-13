@@ -173,6 +173,10 @@ class Indexer:
         A different DOCUMENT_SCHEMA_VERSION is narrower: it drops the hashes of the
         documents only, because their identifiers can change while no file does.
         """
+        workspace = self.config.workspace_root
+        root_real = workspace.resolve()
+        stored_root = self.db.get_meta("workspace_root")
+        root_changed = stored_root is not None and stored_root != str(root_real)
         self._ensure_hashes_loaded()
         stored_document_version = self.db.get_meta("document_schema_version")
         if not force and stored_document_version != str(self.DOCUMENT_SCHEMA_VERSION):
@@ -197,8 +201,6 @@ class Indexer:
             self._file_hashes.clear()
 
         indexed_count = 0
-        workspace = self.config.workspace_root
-        root_real = workspace.resolve()
         seen: set = set()
         # A real directory is entered ONCE: a link back to the root would otherwise be
         # walked without end (measured: 60 levels inside the first 60 yields).
@@ -272,10 +274,39 @@ class Indexer:
             if absolute is None or not absolute.exists() or self.should_ignore(absolute):
                 self.remove_file(absolute if absolute is not None else stale)
 
+        # Purge orphan file_paths in symbols, documents, and search_index that are missing on disk
+        # or match ignore patterns (e.g. inherited from a parent workspace or when force=True).
+        with self.db.get_connection() as conn:
+            orphan_candidates: set[str] = set()
+            for row in conn.execute("SELECT DISTINCT file_path FROM symbols"):
+                if row["file_path"] not in seen:
+                    orphan_candidates.add(row["file_path"])
+            for row in conn.execute("SELECT DISTINCT file_path FROM documents"):
+                if row["file_path"] not in seen:
+                    orphan_candidates.add(row["file_path"])
+            if force or root_changed:
+                for row in conn.execute("SELECT DISTINCT file_path FROM search_index WHERE file_path != ''"):
+                    if row["file_path"] not in seen:
+                        orphan_candidates.add(row["file_path"])
+        for stale in orphan_candidates:
+            try:
+                absolute = self.config.to_absolute_path(stale)
+            except ValueError:
+                absolute = None
+            if (
+                force
+                or root_changed
+                or absolute is None
+                or not absolute.exists()
+                or self.should_ignore_relative(str(stale).replace("\\", "/"))
+            ):
+                self.remove_file(stale)
+
         self.refresh_externals(projects, force=force)
 
         self.db.set_meta("index_schema_version", str(self.INDEX_SCHEMA_VERSION))
         self.db.set_meta("document_schema_version", str(self.DOCUMENT_SCHEMA_VERSION))
+        self.db.set_meta("workspace_root", str(root_real))
         return indexed_count
 
     def refresh_externals(self, projects: List[Path], force: bool = False) -> Optional[Dict[str, Any]]:
@@ -461,7 +492,11 @@ class Indexer:
 
     def remove_file(self, file_path: Path | str) -> None:
         """Remove symbols, document rows and the persisted hash of a deleted file."""
-        rel_posix = self.config.to_relative_posix(file_path)
+        p = Path(file_path)
+        if p.is_absolute():
+            rel_posix = self.config.to_relative_posix(p)
+        else:
+            rel_posix = str(file_path).replace("\\", "/")
         self.db.delete_file_symbols(rel_posix)
         self.db.delete_document(rel_posix)
         self.db.delete_file_hash(rel_posix)

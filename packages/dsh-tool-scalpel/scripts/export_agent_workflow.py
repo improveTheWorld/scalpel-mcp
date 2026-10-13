@@ -6,6 +6,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 repo_root = Path(__file__).resolve().parent.parent.parent.parent
+if (repo_root.parent / "scalpel-benchmarks").is_dir():
+    sys.path.insert(0, str(repo_root.parent / "scalpel-benchmarks"))
 sys.path.insert(0, str(repo_root / "src"))
 sys.path.insert(0, str(repo_root))
 

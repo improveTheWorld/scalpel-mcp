@@ -25,12 +25,14 @@ class PythonParser(BaseParser):
         """Check for syntax errors in Python code using Tree-sitter and ast.parse for actionable hints."""
         # file_path is accepted for interface parity; Python has a single grammar.
         details: List[SyntaxErrorDetail] = []
+        if code.startswith(b"\xef\xbb\xbf"):
+            code = code[3:]
         tree = self._parser.parse(code)
 
         py_error_msg: Optional[str] = None
         py_error_line: Optional[int] = None
         try:
-            ast.parse(code.decode("utf-8", errors="replace"))
+            ast.parse(code.decode("utf-8-sig", errors="replace"))
         except SyntaxError as se:
             py_error_msg = se.msg
             py_error_line = se.lineno

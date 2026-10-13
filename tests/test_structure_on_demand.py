@@ -288,3 +288,17 @@ def test_read_block_has_no_offset_parameter(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError):
         patcher.read_block("docs/spec.md", offset=5)
+
+def test_a_js_file_without_extracted_symbols_returns_file_text(tmp_path: Path) -> None:
+    ws, db, patcher = make_env(tmp_path)
+    (ws / "src" / "client.js").write_text(
+        "import './polyfill.js';\nconsole.log('client ready');\n",
+        encoding="utf-8",
+    )
+    Indexer(patcher.config, db).index_workspace()
+
+    result = patcher.read_block("src/client.js")
+    assert result["status"] == "success", result
+    assert result["kind"] == "file_text"
+    assert result["content_hash"]
+    assert "console.log('client ready');" in result["numbered_text"]

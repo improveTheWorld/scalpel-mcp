@@ -268,7 +268,7 @@ test('P-h: schÃ©mas et descriptions des 8 outils conformes Ã  SCALPEL_SCHEMA
 
   // (2) les outils enregistrÃ©s Ã©galent l'instantanÃ© plus DSH_EXTENSIONS, ni plus ni moins
   const { DSH_EXTENSIONS } = await import('../lib/index.js')
-  assert.equal(tools.size, 8, '8 outils universels')
+  assert.equal(tools.size, 9, '8 outils universels + scalpel_report')
 
   for (const refTool of snapshotRaw.tools) {
     const pluginTool = tools.get(refTool.name)

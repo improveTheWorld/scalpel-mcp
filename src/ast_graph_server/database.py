@@ -77,6 +77,7 @@ class DatabaseManager:
         # whoever wrote the database.
         self._root = Path(workspace_root).resolve() if workspace_root is not None else None
         self._inside_workspace_cache: Dict[str, bool] = {}
+        self._virtual_paths: set[str] = set()
         self._init_db()
 
     def _inside_workspace(self, file_path: Any) -> bool:
@@ -87,12 +88,19 @@ class DatabaseManager:
         cached = self._inside_workspace_cache.get(key)
         if cached is not None:
             return cached
-        try:
-            resolved = (self._root / key).resolve()
-            resolved.relative_to(self._root)
-            ans = True
-        except (OSError, ValueError):
+        norm_key = key.replace("\\", "/")
+        if norm_key == ".." or norm_key.startswith("../") or "/../" in f"/{norm_key}/":
             ans = False
+        else:
+            try:
+                resolved = (self._root / key).resolve()
+                resolved.relative_to(self._root)
+                if key in self._virtual_paths or norm_key in self._virtual_paths:
+                    ans = True
+                else:
+                    ans = resolved.exists()
+            except (OSError, ValueError):
+                ans = False
         self._inside_workspace_cache[key] = ans
         return ans
 
@@ -240,9 +248,21 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_staged_file ON staged_changes(file_path);
                 """
             )
+            sec_count = conn.execute("SELECT COUNT(*) FROM document_sections").fetchone()[0]
+            if sec_count > 0:
+                fts_count = conn.execute("SELECT COUNT(*) FROM document_sections_fts").fetchone()[0]
+                if fts_count == 0:
+                    conn.execute(
+                        """
+                        INSERT INTO document_sections_fts (section_id, document_id, heading, content)
+                        SELECT id, document_id, heading, content FROM document_sections
+                        """
+                    )
 
     def upsert_file_symbols(self, file_path: str, symbols: List[SymbolInfo], calls: List[CallInfo]) -> None:
         """Replace all symbols and calls for a given file atomically."""
+        self._virtual_paths.add(str(file_path))
+        self._inside_workspace_cache.pop(str(file_path), None)
         with self.get_connection() as conn:
             with conn:
                 # Delete existing symbols (cascades to calls)
@@ -308,6 +328,8 @@ class DatabaseManager:
 
     def delete_file_symbols(self, file_path: str) -> None:
         """Remove all symbols for a deleted file."""
+        self._virtual_paths.discard(str(file_path))
+        self._inside_workspace_cache.pop(str(file_path), None)
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM symbols WHERE file_path = ?", (file_path,))
@@ -378,7 +400,7 @@ class DatabaseManager:
         return [
             file_path
             for file_path in self.get_indexed_paths()
-            if path_matches(file_path, file_pattern)
+            if self._inside_workspace(file_path) and path_matches(file_path, file_pattern)
         ]
 
     def get_meta(self, key: str) -> Optional[str]:
@@ -403,6 +425,8 @@ class DatabaseManager:
 
     def set_file_hash(self, file_path: str, content_hash: str) -> None:
         """Record the hash of a file that was just indexed."""
+        self._virtual_paths.add(str(file_path))
+        self._inside_workspace_cache.pop(str(file_path), None)
         with self.get_connection() as conn:
             with conn:
                 conn.execute(
@@ -413,12 +437,15 @@ class DatabaseManager:
 
     def delete_file_hash(self, file_path: str) -> None:
         """Forget a file (used when it is deleted)."""
+        self._virtual_paths.discard(str(file_path))
+        self._inside_workspace_cache.pop(str(file_path), None)
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM indexed_files WHERE file_path = ?", (file_path,))
 
     def clear_indexed_files(self) -> None:
         """Force a full re-index on the next scan."""
+        self._inside_workspace_cache.clear()
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM indexed_files")
@@ -436,6 +463,10 @@ class DatabaseManager:
         """Insert relevance entries (kind, ref_id, file_path, title, body)."""
         if not entries:
             return
+        for e in entries:
+            fp = str(e["file_path"])
+            self._virtual_paths.add(fp)
+            self._inside_workspace_cache.pop(fp, None)
         with self.get_connection() as conn:
             with conn:
                 conn.executemany(
@@ -480,6 +511,8 @@ class DatabaseManager:
             ).fetchall()
             results = []
             for row in rows:
+                if not self._inside_workspace(row["file_path"]):
+                    continue
                 kind = row["kind"]
                 raw_score = -float(row["score"])
                 weight = self.SEMANTIC_KIND_WEIGHTS.get(kind, 1.0)
@@ -669,6 +702,8 @@ class DatabaseManager:
 
             for r in rows:
                 fpath = r["file_path"]
+                if not self._inside_workspace(fpath):
+                    continue
                 if not path_matches(fpath, file_pattern):
                     continue
 
@@ -691,6 +726,8 @@ class DatabaseManager:
     # ------------------------------------------------------------------
     def upsert_document(self, file_path: str, document: ParsedDocument, content_hash: str) -> None:
         """Replace a document and its sections atomically."""
+        self._virtual_paths.add(str(file_path))
+        self._inside_workspace_cache.pop(str(file_path), None)
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM documents WHERE file_path = ?", (file_path,))
@@ -726,6 +763,8 @@ class DatabaseManager:
 
     def delete_document(self, file_path: str) -> None:
         """Remove a document and its sections."""
+        self._virtual_paths.discard(str(file_path))
+        self._inside_workspace_cache.pop(str(file_path), None)
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM documents WHERE file_path = ?", (file_path,))
@@ -828,6 +867,7 @@ class DatabaseManager:
                    "s.id AS section_id, s.heading, s.level, s.order_index, "
                    "substr(s.content, 1, 240) AS snippet")
         params: List[Any] = []
+        fts_tokens: List[str] = []
         if terms:
             patterns = ["%" + term + "%" for term in terms]
             heading_hits = " + ".join("CASE WHEN s.heading LIKE ? THEN 1 ELSE 0 END" for _ in terms)
@@ -837,17 +877,42 @@ class DatabaseManager:
             where = "(" + " OR ".join("s.heading LIKE ? OR s.content LIKE ?" for _ in terms) + ")"
             params = patterns + patterns + ["%" + query_str.strip() + "%"]
             params += [pattern for pattern in patterns for _ in (0, 1)]
+            for term in terms:
+                for tok in re.findall(r"\w{2,}", term, flags=re.UNICODE):
+                    if tok not in fts_tokens:
+                        fts_tokens.append(tok)
         else:
             score = "0"
             where = "1"
+        fts_match_expr = " OR ".join(f'"{tok}"*' for tok in fts_tokens)
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT " + columns + ", " + score + " AS score "
-                "FROM document_sections s JOIN documents d ON d.id = s.document_id "
-                "WHERE " + where + " "
-                "ORDER BY score DESC, d.file_path ASC, s.order_index ASC",
-                params,
-            ).fetchall()
+            rows = []
+            if terms and fts_match_expr:
+                fts_score = (
+                    "(100 * (" + heading_hits + ") + (" + content_hits + ") + "
+                    + phrase_bonus + " + ROUND(-bm25(document_sections_fts, 10.0, 1.0), 3))"
+                )
+                fts_params = patterns + patterns + ["%" + query_str.strip() + "%", fts_match_expr]
+                try:
+                    rows = conn.execute(
+                        "SELECT " + columns + ", " + fts_score + " AS score "
+                        "FROM document_sections s "
+                        "JOIN documents d ON d.id = s.document_id "
+                        "JOIN document_sections_fts ON s.id = document_sections_fts.section_id "
+                        "WHERE document_sections_fts MATCH ? "
+                        "ORDER BY score DESC, d.file_path ASC, s.order_index ASC",
+                        fts_params,
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+            if not rows:
+                rows = conn.execute(
+                    "SELECT " + columns + ", " + score + " AS score "
+                    "FROM document_sections s JOIN documents d ON d.id = s.document_id "
+                    "WHERE " + where + " "
+                    "ORDER BY score DESC, d.file_path ASC, s.order_index ASC",
+                    params,
+                ).fetchall()
         results: List[Dict[str, Any]] = []
         for row in rows:
             item = dict(row)
@@ -1004,47 +1069,60 @@ class DatabaseManager:
             return 1.0
 
         with self.get_connection() as conn:
-            # Summary stats
-            kind_rows = [
-                row for row in conn.execute("SELECT file_path, kind FROM symbols")
-                if self._inside_workspace(row["file_path"])
-            ]
-            doc_rows = [
-                row for row in conn.execute("SELECT file_path, doc_type FROM documents")
-                if self._inside_workspace(row["file_path"])
-            ]
-            section_total = sum(
-                1 for row in conn.execute(
-                    "SELECT d.file_path FROM document_sections s "
-                    "JOIN documents d ON d.id = s.document_id"
-                ) if self._inside_workspace(row["file_path"])
-            )
+            # Summary stats (grouped in SQL to avoid loading all symbol/section rows)
             kinds: Dict[str, int] = {}
-            for row in kind_rows:
-                kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
+            symbol_total = 0
+            for row in conn.execute(
+                "SELECT file_path, kind, COUNT(*) AS cnt FROM symbols GROUP BY file_path, kind"
+            ):
+                if not self._inside_workspace(row["file_path"]):
+                    continue
+                cnt = int(row["cnt"])
+                symbol_total += cnt
+                kinds[row["kind"]] = kinds.get(row["kind"], 0) + cnt
+
+            doc_rows = [
+                row
+                for row in conn.execute(
+                    "SELECT id, file_path, doc_type, title, section_count FROM documents ORDER BY file_path ASC"
+                )
+                if self._inside_workspace(row["file_path"])
+            ]
+            section_total = sum(int(row["section_count"] or 0) for row in doc_rows)
             types: Dict[str, int] = {}
             for row in doc_rows:
                 types[row["doc_type"]] = types.get(row["doc_type"], 0) + 1
             result["summary"] = {
-                "symbols": len(kind_rows),
+                "symbols": symbol_total,
                 "documents": len(doc_rows),
                 "sections": section_total,
                 "symbol_kinds": dict(sorted(kinds.items(), key=lambda item: -item[1])),
                 "document_types": dict(sorted(types.items(), key=lambda item: -item[1])),
             }
 
+            # Preload top 7 non-empty headings per document in a single query (eliminates N+1)
+            doc_headings_map: Dict[str, List[str]] = {}
+            for h_row in conn.execute(
+                """
+                SELECT document_id, heading
+                FROM (
+                    SELECT document_id, heading,
+                           ROW_NUMBER() OVER (PARTITION BY document_id ORDER BY order_index ASC) AS rn
+                    FROM document_sections
+                    WHERE heading != ''
+                )
+                WHERE rn <= 7
+                ORDER BY document_id, rn
+                """
+            ):
+                doc_headings_map.setdefault(h_row["document_id"], []).append(h_row["heading"])
+
             # 1. Documents selection with H1 title deduplication
             doc_items: List[Dict[str, Any]] = []
-            for row in conn.execute("SELECT id, file_path, title, section_count FROM documents ORDER BY file_path ASC"):
-                if not self._inside_workspace(row["file_path"]):
-                    continue
+            for row in doc_rows:
                 if not path_matches(row["file_path"], file_pattern):
                     continue
-                sec_rows = conn.execute(
-                    "SELECT heading FROM document_sections WHERE document_id = ? ORDER BY order_index ASC LIMIT 7",
-                    (row["id"],),
-                ).fetchall()
-                raw_headings = [s["heading"] for s in sec_rows if s["heading"]]
+                raw_headings = list(doc_headings_map.get(row["id"], []))
                 while raw_headings and row["title"] and raw_headings[0].strip().lower() == row["title"].strip().lower():
                     raw_headings.pop(0)
                 section_titles = raw_headings[:6]

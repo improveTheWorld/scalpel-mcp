@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import pytest
 from pathlib import Path
 from pydantic.fields import FieldInfo
@@ -7,6 +8,7 @@ from pydantic.fields import FieldInfo
 from ast_graph_server.config import ServerConfig
 from ast_graph_server.server import ASTGraphServer
 from ast_graph_server.database import path_matches
+from ast_graph_server.documents import DocumentSection, ParsedDocument
 
 
 def make_test_env(tmp_path: Path, files: dict) -> tuple:
@@ -200,3 +202,106 @@ async def test_stress_and_large_volume(tmp_path: Path):
     assert big_match.get("content_truncated") is True
     assert big_match["content_total_chars"] > 4000
     assert len(big_match["content"]) == 4000
+
+def test_search_documents_fts5_performance_and_special_queries(tmp_path: Path):
+    """Vérifie que search_documents utilise FTS5 (< 30 ms sur 1000+ sections) et gère les opérateurs piégeux."""
+    ws, server = make_test_env(
+        tmp_path,
+        {
+            "docs/csharp.md": "# C# Development\n\nUtilisation de C# 12 et .NET 8.\n\n## 100% Coverage\n\nObjectif 100% de tests ???",
+        },
+    )
+    db = server.db
+
+    # Peupler 1200 sections pour valider la performance FTS5
+    bulk_sections = [
+        DocumentSection(
+            heading=f"Section {i}",
+            level=2,
+            order_index=i,
+            content=f"Documentation standard de la section {i} avec du texte générique.",
+        )
+        for i in range(1200)
+    ]
+    bulk_sections.append(
+        DocumentSection(
+            heading="Syntax & Operators Guide",
+            level=2,
+            order_index=1200,
+            content='C++ programming with pointer* and AND logic and "quote UniqueFastToken2026',
+        )
+    )
+    db.upsert_document(
+        "docs/bulk.md",
+        ParsedDocument(doc_type="markdown", title="Bulk Doc", sections=bulk_sections),
+        content_hash="bulk_hash",
+    )
+
+    # Chauffer la connexion SQLite puis mesurer la recherche FTS5 sur > 1200 sections
+    db.search_documents("UniqueFastToken2026", limit=8)
+    t0 = time.perf_counter()
+    fast_matches = db.search_documents("UniqueFastToken2026", limit=8)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert len(fast_matches) == 1
+    assert fast_matches[0]["heading"] == "Syntax & Operators Guide"
+    assert elapsed_ms < 30.0, f"search_documents FTS5 trop lent sur 1200 sections: {elapsed_ms:.2f} ms"
+
+    # Requêtes avec opérateurs FTS5 piégeux ou caractères spéciaux (zéro OperationalError)
+    for tricky_query, expected_heading in [
+        ("logic AND", "Syntax & Operators Guide"),
+        ('programming "quote', "Syntax & Operators Guide"),
+        ("C++", "Syntax & Operators Guide"),
+        ("100%", "100% Coverage"),
+        ("???", "100% Coverage"),
+        ("c#", "C# Development"),
+    ]:
+        res = db.search_documents(tricky_query, limit=8)
+        assert res, f"Aucun résultat pour la requête piégeuse {tricky_query!r}"
+        assert any(m["heading"] == expected_heading for m in res), (
+            f"Heading {expected_heading!r} absent pour {tricky_query!r}: {res}"
+        )
+
+
+def test_get_project_map_sql_optimization_and_deduplication(tmp_path: Path):
+    """Vérifie que get_project_map retourne les bons totaux summary et déduplique les titres H1 sans N+1."""
+    doc_md = (
+        "# Guide Architecture\n\n"
+        "Intro guide.\n\n"
+        "## Section 1\n\nTexte 1.\n\n"
+        "## Section 2\n\nTexte 2.\n\n"
+        "## Section 3\n\nTexte 3.\n\n"
+        "## Section 4\n\nTexte 4.\n\n"
+        "## Section 5\n\nTexte 5.\n\n"
+        "## Section 6\n\nTexte 6.\n\n"
+        "## Section 7\n\nTexte 7.\n"
+    )
+    ws, server = make_test_env(
+        tmp_path,
+        {
+            "docs/arch.md": doc_md,
+            "docs/second.md": "# Second Doc\n\n## Alpha\n\nBody alpha.\n",
+            "src/core.py": "class CoreEngine:\n    def run(self):\n        return 42\n\ndef helper():\n    return CoreEngine().run()\n",
+        },
+    )
+    fmap = server.db.get_project_map(budget_tokens=8000, answer_format="json")
+    summary = fmap["summary"]
+    assert summary["documents"] == 2
+    assert summary["sections"] == 10  # 8 dans arch.md + 2 dans second.md
+    assert summary["symbols"] >= 3
+    assert summary["document_types"] == {"markdown": 2}
+    assert "class" in summary["symbol_kinds"]
+
+    docs_by_path = {d["file_path"]: d for d in fmap["documents"]}
+    assert "docs/arch.md" in docs_by_path
+    arch_doc = docs_by_path["docs/arch.md"]
+    assert arch_doc["title"] == "Guide Architecture"
+    assert arch_doc["sections"] == 8
+    # H1 "Guide Architecture" dédupliqué, et plafonné aux 6 premiers H2
+    assert arch_doc["section_titles"] == [
+        "Section 1",
+        "Section 2",
+        "Section 3",
+        "Section 4",
+        "Section 5",
+        "Section 6",
+    ]

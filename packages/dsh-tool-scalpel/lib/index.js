@@ -175,22 +175,23 @@ export function apply(ctx, config, options = {}) {
     })
   })
 
-  function isWholeFileOrUnresolvedError(resOrErr) {
-    if (!resOrErr) return false
-    const msg = typeof resOrErr === 'string'
-      ? resOrErr
-      : (resOrErr.error || resOrErr.message || JSON.stringify(resOrErr))
-    if (typeof msg !== 'string') return false
-    const lower = msg.toLowerCase()
-    return (
-      lower.includes('whole code file') ||
-      lower.includes('whole file') ||
-      lower.includes('nothing inside it is a block') ||
-      lower.includes('recognised no container') ||
-      lower.includes('unresolved') ||
-      lower.includes('no symbol or markdown section has this identifier')
-    )
-  }
+    function isWholeFileOrUnresolvedError(resOrErr) {
+      if (!resOrErr) return false
+      const msg = typeof resOrErr === 'string'
+        ? resOrErr
+        : (resOrErr.error || resOrErr.message || JSON.stringify(resOrErr))
+      if (typeof msg !== 'string') return false
+      const lower = msg.toLowerCase()
+      return (
+        lower.includes('whole code file') ||
+        lower.includes('whole file') ||
+        lower.includes('nothing inside it is a block') ||
+        lower.includes('recognised no container') ||
+        lower.includes('unresolved') ||
+        lower.includes('no symbol or markdown section has this identifier') ||
+        lower.includes('outside the workspace root')
+      )
+    }
   // 1. Enregistrement des 8 outils Scalpel universels depuis agent_schemas.json
   for (const name of SCALPEL_TOOLS) {
     const baseSchema = AGENT_SCHEMAS_MAP.get(name)
