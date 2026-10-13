@@ -3445,8 +3445,7 @@ class Patcher:
                     "error": (
                         "Refused: " + str(trouble["translation"]) + " Entry " + str(index)
                         + " of this call carries an operation the tool cannot read, so it"
-                        " cannot tell which lines that operation addresses. Nothing about your"
-                        " expected_hash is wrong and no other entry of this call wrote the"
+                        " cannot tell which lines that operation addresses. No other entry of this call wrote the"
                         " line: the operation itself is unreadable. The refused entry wrote"
                         " nothing."
                     ),
@@ -6398,9 +6397,14 @@ class Patcher:
         return warnings
 
     def _section_ids_from(
-        self, layout: List[dict], document_id: str, start_offset: int, level: int
+        self,
+        layout: List[dict],
+        document_id: str,
+        start_offset: int,
+        level: int,
+        end_offset: Optional[int] = None,
     ) -> List[str]:
-        """Identifiers of the section starting at start_offset, plus its sub-sections.
+        """Identifiers of the section starting at start_offset, plus its sub-sections (or all sections up to end_offset).
 
         A heading inside the submitted content becomes a section of its own, so
         the caller cannot guess how many sections its write produced. Reporting
@@ -6412,7 +6416,10 @@ class Patcher:
         for item in layout:
             if item["section_start"] < start_offset:
                 continue
-            if order_indices and int(item["level"]) <= level:
+            if end_offset is not None:
+                if item["section_start"] >= end_offset:
+                    break
+            elif order_indices and int(item["level"]) <= level:
                 break
             order_indices.append(int(item["index"]))
         by_index = {
@@ -6917,7 +6924,8 @@ class Patcher:
         self._atomic_write(abs_path, new_text.encode("utf-8"))
         self._reindex(abs_path)
         after_layout = markdown_layout(new_text)
-        created = self._section_ids_from(after_layout, document_id, block_start, level)
+        block_end = block_start + len(block)
+        created = self._section_ids_from(after_layout, document_id, block_start, level, end_offset=block_end)
         warnings = self._structure_warnings(after_layout, block_start, level, heading_text)
         if renumbered:
             # The tool rewrote headings the caller never mentioned: it must say so, or

@@ -167,6 +167,20 @@ def test_the_id_returned_by_insert_block_is_accepted_by_read_block(tmp_path: Pat
     assert deeper["status"] == "success", deeper
 
 
+def test_insert_block_multiple_headings_reports_all_created_section_ids(tmp_path: Path) -> None:
+    """When insert_block receives text with multiple headings, created_section_ids lists ALL of them."""
+    ws, db, patcher = make_env(tmp_path)
+    patcher.insert_block("docs", text="guide.md\n# Guide\n\nIntroduction.")
+
+    multi_text = "### Authentication\n\nOAuth details.\n\n### PWAF Compliance\n\nCompliance criteria."
+    res = patcher.insert_block("docs/guide.md::Guide", text=multi_text)
+
+    assert res["status"] == "success", res
+    assert len(res["created_section_ids"]) == 2, res["created_section_ids"]
+    assert any("authentication" in s for s in res["created_section_ids"])
+    assert any("compliance" in s for s in res["created_section_ids"])
+
+
 def test_a_name_only_text_creates_an_empty_file(tmp_path: Path) -> None:
     ws, db, patcher = make_env(tmp_path)
 
