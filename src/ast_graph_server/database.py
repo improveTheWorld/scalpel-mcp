@@ -25,6 +25,8 @@ def path_matches(file_path: str, file_pattern: Optional[str]) -> bool:
     file carried no such symbol and searched again by another route (measured on
     mapab2 b r1, and again on b of the base 7c40a9e, which reported it).
     """
+    if hasattr(file_pattern, "default"):
+        file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
     if not file_pattern:
         return True
     if fnmatch.fnmatch(file_path, file_pattern):
@@ -700,8 +702,13 @@ class DatabaseManager:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_documents(self, file_pattern: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    def list_documents(self, file_pattern: Optional[str] = None, limit: Optional[int] = 200) -> List[Dict[str, Any]]:
         """List indexed documents with their title and section count."""
+        if hasattr(file_pattern, "default"):
+            file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
+        if hasattr(limit, "default"):
+            limit = limit.default if str(limit.default) != "PydanticUndefined" else 200
+        safe_limit = int(limit) if limit is not None else None
         with self.get_connection() as conn:
             rows = conn.execute(
                 "SELECT id, file_path, doc_type, title, section_count FROM documents ORDER BY file_path ASC"
@@ -713,7 +720,7 @@ class DatabaseManager:
                 if not path_matches(row["file_path"], file_pattern):
                     continue
                 results.append(dict(row))
-                if len(results) >= limit:
+                if safe_limit is not None and len(results) >= safe_limit:
                     break
             return results
 
@@ -738,7 +745,28 @@ class DatabaseManager:
         get_document_sections. A body cut by max_content_chars is flagged with
         content_truncated/content_total_chars and never presented as complete.
         """
-        terms = query_terms(query)
+        if hasattr(query, "default"):
+            query = query.default if str(query.default) != "PydanticUndefined" else ""
+        if hasattr(file_pattern, "default"):
+            file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
+        if hasattr(limit, "default"):
+            limit = limit.default if str(limit.default) != "PydanticUndefined" else 8
+        if hasattr(include_content, "default"):
+            include_content = include_content.default if str(include_content.default) != "PydanticUndefined" else False
+        if hasattr(max_content_chars, "default"):
+            max_content_chars = max_content_chars.default if str(max_content_chars.default) != "PydanticUndefined" else 4000
+        if hasattr(full_top, "default"):
+            full_top = full_top.default if str(full_top.default) != "PydanticUndefined" else 0
+
+        query_str = str(query or "")
+        safe_limit = int(limit) if limit is not None else 8
+        safe_full_top = max(0, int(full_top)) if full_top is not None else 0
+        safe_max_content_chars = int(max_content_chars) if max_content_chars is not None else 4000
+        include_content = bool(include_content)
+
+        terms = query_terms(query_str)
+        if not terms and query_str.strip():
+            terms = [query_str.strip().lower()]
         columns = ("d.id AS document_id, d.file_path, d.doc_type, d.title, "
                    "s.id AS section_id, s.heading, s.level, s.order_index, "
                    "substr(s.content, 1, 240) AS snippet")
@@ -750,7 +778,7 @@ class DatabaseManager:
             phrase_bonus = "CASE WHEN s.content LIKE ? THEN 20 ELSE 0 END"
             score = "(100 * (" + heading_hits + ") + (" + content_hits + ") + " + phrase_bonus + ")"
             where = "(" + " OR ".join("s.heading LIKE ? OR s.content LIKE ?" for _ in terms) + ")"
-            params = patterns + patterns + ["%" + (query or "").strip() + "%"]
+            params = patterns + patterns + ["%" + query_str.strip() + "%"]
             params += [pattern for pattern in patterns for _ in (0, 1)]
         else:
             score = "0"
@@ -771,10 +799,10 @@ class DatabaseManager:
             if not path_matches(item["file_path"], file_pattern):
                 continue
             results.append(item)
-            if len(results) >= int(limit):
+            if len(results) >= safe_limit:
                 break
-        inlined = max(0, int(full_top))
-        cap = int(max_content_chars)
+        inlined = safe_full_top
+        cap = safe_max_content_chars
         for index, item in enumerate(results):
             if not include_content and index >= inlined:
                 continue

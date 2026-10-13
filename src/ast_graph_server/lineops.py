@@ -90,7 +90,7 @@ def apply_ops(
                 first, last = int(op["replace"][0]), int(op["replace"][1])
                 if first < 1 or last < first or last > total:
                     return OpResult(text, {"status": "error", "error":
-                        "op " + str(index) + ": replace range must be inside 1.." + str(total) + "."})
+                        "op " + str(index) + ": replace range must be inside 1.." + str(total) + " (block-relative lines 1.." + str(total) + ", not absolute file line numbers)."})
                 column = (
                     _nearest_indent(lines, first - 1, 1)
                     or _nearest_indent(lines, first - 2, -1)
@@ -101,13 +101,13 @@ def apply_ops(
                 first, last = int(op["delete"][0]), int(op["delete"][1])
                 if first < 1 or last < first or last > total:
                     return OpResult(text, {"status": "error", "error":
-                        "op " + str(index) + ": delete range must be inside 1.." + str(total) + "."})
+                        "op " + str(index) + ": delete range must be inside 1.." + str(total) + " (block-relative lines 1.." + str(total) + ", not absolute file line numbers)."})
                 actions.append((first - 1, last, [], index))
             elif "insert_after" in op:
                 position = int(op["insert_after"])
                 if position < 0 or position > total:
                     return OpResult(text, {"status": "error", "error":
-                        "op " + str(index) + ": insert_after must be inside 0.." + str(total) + "."})
+                        "op " + str(index) + ": insert_after must be inside 0.." + str(total) + " (block-relative lines 0.." + str(total) + ", not absolute file line numbers)."})
                 if position in insert_points:
                     return OpResult(text, {"status": "error", "error":
                         "op " + str(index) + ": another insert already targets position " + str(position) + "."})

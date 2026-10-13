@@ -671,3 +671,9 @@ def test_keeping_or_replacing_the_bullet_is_silent() -> None:
     assert Patcher._heading_range_drops_a_bullet(
         [{"replace": [3, 3], "content": "2. **Beta:**"}], before
     ) is None
+
+def test_lineops_error_clarifies_block_relative_lines() -> None:
+    text = "line1\nline2\n"
+    res = apply_ops(text, [{"replace": [1, 99], "content": "x"}], literal)
+    assert res.error is not None
+    assert "block-relative lines 1..2, not absolute file line numbers" in res.error["error"]

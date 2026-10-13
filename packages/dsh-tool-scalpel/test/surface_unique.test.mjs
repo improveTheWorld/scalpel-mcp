@@ -14,27 +14,27 @@ function createHarness({ sandboxMode = 'workspace-write', callToolImpl } = {}) {
     inject: () => {}
   };
 
-  const defaultCallTool = async (_ws, name, args) => {
-    if (name === 'read_block') {
-      const p = path.resolve(ws, args.path);
-      if (!fs.existsSync(p)) {
-        return { status: 'error', error: `File not found: ${args.path}` };
+    const defaultCallTool = async (_ws, name, args) => {
+      if (name === 'read_block') {
+        const p = path.resolve(ws, args.path);
+        if (!fs.existsSync(p)) {
+          return { status: 'error', error: `File not found: ${args.path}` };
+        }
+        const buf = fs.readFileSync(p);
+        const hash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
+        const lines = buf.toString('utf8').split(/\r?\n/);
+        const width = String(lines.length).length;
+        const numLines = lines.map((l, i) => `${String(i + 1).padStart(width, ' ')} | ${l}`).join('\n');
+        return `${args.path} [file_text] [h:${hash}] (${lines.length} lines)\n${numLines}`;
       }
-      const buf = fs.readFileSync(p);
-      const hash = crypto.createHash('sha1').update(buf).digest('hex');
-      const lines = buf.toString('utf8').split(/\r?\n/);
-      const width = String(lines.length).length;
-      const numLines = lines.map((l, i) => `${String(i + 1).padStart(width, ' ')} | ${l}`).join('\n');
-      return `${args.path} [file_text] [h:${hash.slice(0, 8)}] (${lines.length} lines)\n${numLines}`;
-    }
-    if (name === 'edit_block') {
-      return { status: 'error', error: `'${args.path}' is a whole code file, not a block inside one.` };
-    }
-    if (name === 'delete_block') {
-      return { status: 'error', error: `'${args.path}' is a whole FILE, not a block inside one, and nothing was touched.` };
-    }
-    return { status: 'success' };
-  };
+      if (name === 'edit_block') {
+        return { status: 'error', error: `'${args.path}' is a whole code file, not a block inside one.` };
+      }
+      if (name === 'delete_block') {
+        return { status: 'error', error: `'${args.path}' is a whole FILE, not a block inside one, and nothing was touched.` };
+      }
+      return { status: 'success' };
+    };
 
   apply(fakeCtx, {}, {
     callTool: callToolImpl || defaultCallTool,
@@ -57,7 +57,7 @@ test('1. Lecture d\'un .ps1 via read_block -> texte numéroté et hash', async (
     const content = 'Write-Host "hello"\nWrite-Host "world"\n';
     fs.writeFileSync(ps1Path, content, 'utf8');
 
-    const expectedHash = crypto.createHash('sha1').update(Buffer.from(content, 'utf8')).digest('hex').slice(0, 8);
+    const expectedHash = crypto.createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex').slice(0, 8);
 
     const readTool = h.tools.get('read_block');
     assert.ok(readTool);
@@ -79,7 +79,7 @@ test('2. Édition de lignes d\'un .ps1 via edit_block avec expected_hash -> modi
     const content = 'line 1\nline 2\nline 3\n';
     fs.writeFileSync(ps1Path, content, 'utf8');
 
-    const fullHash = crypto.createHash('sha1').update(Buffer.from(content, 'utf8')).digest('hex');
+    const fullHash = crypto.createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex').slice(0, 8);
 
     const editTool = h.tools.get('edit_block');
     assert.ok(editTool);

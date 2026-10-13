@@ -94,8 +94,8 @@ test('editFileBlock - détection de conflit de hash (Stale read)', async () => {
   const initialContent = 'first line\nsecond line\nthird line\n';
   await fs.writeFile(filePath, initialContent, 'utf8');
 
-  const correctHash = crypto.createHash('sha1').update(Buffer.from(initialContent, 'utf8')).digest('hex');
-  const staleHash = '0123456789abcdef0123456789abcdef01234567';
+  const correctHash = crypto.createHash('sha256').update(Buffer.from(initialContent, 'utf8')).digest('hex').slice(0, 8);
+  const staleHash = 'deadbeef';
 
   // Tentative avec mauvais hash -> doit échouer
   await assert.rejects(

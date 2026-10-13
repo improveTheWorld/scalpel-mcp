@@ -134,3 +134,23 @@ def test_read_and_edit_python_imports_and_constants(tmp_path):
     results = db.search_symbols("DEFAULT_TIMEOUT")
     assert len(results) == 1
     assert results[0]["symbol_id"] == "src/config.py::DEFAULT_TIMEOUT"
+
+def test_python_parser_indexes_compound_blocks():
+    parser = PythonParser()
+    code = (
+        "if __name__ == '__main__':\n"
+        "    def run_main():\n"
+        "        pass\n"
+        "    MAIN_FLAG = True\n"
+        "try:\n"
+        "    def fallback_helper():\n"
+        "        pass\n"
+        "except Exception:\n"
+        "    pass\n"
+    ).encode("utf-8")
+    result = parser.parse_file("script.py", code)
+    assert result.syntax_ok
+    names = {s.name for s in result.symbols}
+    assert "run_main" in names
+    assert "MAIN_FLAG" in names
+    assert "fallback_helper" in names

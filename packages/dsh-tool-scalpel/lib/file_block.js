@@ -368,9 +368,18 @@ export async function editFileBlock({ absPath, ops, expectedHash, fsApi = fs.pro
     throw err;
   }
 
-  const currentHash = crypto.createHash('sha1').update(buf).digest('hex');
+  const currentHash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
 
-  if (expectedHash && expectedHash !== currentHash) {
+  const hashesMatch = (exp, act) => {
+    if (!exp || !act) return false;
+    const e = String(exp).trim();
+    const a = String(act).trim();
+    if (e === a) return true;
+    if (e.length >= 6 && (a.startsWith(e) || e.startsWith(a))) return true;
+    return false;
+  };
+
+  if (expectedHash && !hashesMatch(expectedHash, currentHash)) {
     throw new Error(
       `Stale read: the block changed since you read it (expected ${expectedHash}, current ${currentHash}) [h:${currentHash}]`
     );
@@ -385,7 +394,7 @@ export async function editFileBlock({ absPath, ops, expectedHash, fsApi = fs.pro
   }
 
   const finalText = hasBOM ? '\uFEFF' + newText : newText;
-  const newHash = crypto.createHash('sha1').update(Buffer.from(finalText, 'utf8')).digest('hex');
+  const newHash = crypto.createHash('sha256').update(Buffer.from(finalText, 'utf8')).digest('hex').slice(0, 8);
 
   const tmpPath = `${absPath}.${crypto.randomUUID()}.tmp`;
   try {

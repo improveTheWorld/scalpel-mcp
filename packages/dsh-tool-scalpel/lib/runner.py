@@ -1,6 +1,7 @@
-import asyncio
+﻿import asyncio
 import json
 from pathlib import Path
+import re
 import sys
 
 repo_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -15,7 +16,29 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 from ast_graph_server.config import ServerConfig
 from ast_graph_server.server import ASTGraphServer
-from benchmarks.toolsets import SCALPEL_SCHEMAS, _plain_tool_error
+from ast_graph_server.toolset_schemas import SCALPEL_SCHEMAS
+
+def _plain_tool_error(name: str, exc: Exception, accepted: list) -> str:
+    text = str(exc)
+    if text.strip().startswith("Error executing tool"):
+        return (
+            name + " failed INSIDE the tool -- this is NOT a parameter problem, your arguments "
+            "were accepted. Retry the same call once; if it fails again, reach the same block "
+            "another way (read the whole file, or find it with search_documents)."
+        )
+    if "validation error for" in text:
+        named = sorted({key for key in accepted if re.search(r"\b" + re.escape(key) + r"\b", text)})
+        detail = (
+            "the value of " + ", ".join(named) + " has the wrong type or shape"
+            if named else "an argument has the wrong type or shape"
+        )
+        return name + " refused the call: " + detail + " -- it accepts " + ", ".join(accepted) + "."
+    first = text.split("For further information visit", 1)[0].strip()
+    first = re.sub(r"\s*\n\s*", " ", first)
+    return (
+        name + " refused the call: " + first[:400]
+        + " -- it accepts " + ", ".join(accepted) + "."
+    )
 
 def main():
     if len(sys.argv) < 3:
@@ -24,11 +47,6 @@ def main():
 
     workspace = sys.argv[1]
     cmd = sys.argv[2]
-    # Arguments : argv[3] (ancien pont, encore charge dans un process DSH non redemarre) OU
-    # entree standard (nouveau pont, qui la ferme). Ne JAMAIS lire stdin quand argv porte les
-    # arguments : l'ancien pont laisse stdin ouvert, et la lecture bloquait pour toujours
-    # (mesure le 11/10/2026). Le code Python est relu a chaque appel, le pont JS non : les deux
-    # cotes changent a des instants differents, le protocole doit accepter les deux formes.
     if len(sys.argv) > 3:
         raw = sys.argv[3]
     elif sys.stdin is None or sys.stdin.isatty():

@@ -364,3 +364,17 @@ def test_inserting_into_a_file_that_does_not_exist_names_the_files_that_can_take
     assert "does not exist" in result["error"]
     assert any("billing.py" in name for name in result["files_that_can_take_it"])
     assert "insert_block" in result["actionable_hint"]
+
+def test_delete_block_batch_paths(
+    workspace: Path,
+    patcher_env: tuple[Patcher, DatabaseManager, Indexer, ServerConfig],
+) -> None:
+    patcher, db, indexer, config = patcher_env
+    doc = workspace / "doc_test.md"
+    doc.write_text("# Titre\n\n## Section 1\n\nCorps 1\n\n## Section 2\n\nCorps 2\n", encoding="utf-8")
+    indexer.index_workspace()
+
+    res = patcher.delete_block(paths=["doc_test.md::Titre::Section 1", "doc_test.md::Titre::Section 2"])
+    assert res["status"] == "success"
+    assert res["deleted_count"] == 2
+    assert len(res["results"]) == 2

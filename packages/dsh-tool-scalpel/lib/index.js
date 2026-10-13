@@ -391,7 +391,7 @@ export function apply(ctx, config, options = {}) {
             if (isFile) {
               const cryptoMod = await import('node:crypto')
               const buf = fs.readFileSync(absPath)
-              const hash = cryptoMod.createHash('sha1').update(buf).digest('hex')
+              const hash = cryptoMod.createHash('sha256').update(buf).digest('hex').slice(0, 8)
               const hasBOM = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF
               const text = hasBOM ? buf.subarray(3).toString('utf8') : buf.toString('utf8')
               let raw = text
@@ -400,7 +400,7 @@ export function apply(ctx, config, options = {}) {
               const lines = raw === '' ? [] : raw.split(/\r?\n/)
               const width = String(Math.max(1, lines.length)).length
               const numbered = lines.map((l, i) => `${String(i + 1).padStart(width, ' ')} | ${l}`).join('\n')
-              const header = `${absPath} [file_text] [h:${hash.slice(0, 8)}] (${lines.length} lines)`
+              const header = `${absPath} [file_text] [h:${hash}] (${lines.length} lines)`
               if (scalpelArgs.format === 'json') {
                 return {
                   status: 'success',
@@ -423,6 +423,95 @@ export function apply(ctx, config, options = {}) {
       }
     })
   }
+
+  // 1b. Enregistrement de l'outil d'évaluation unifié scalpel_report
+  ctx.tools.register({
+    name: 'scalpel_report',
+    description: "Enregistre un bilan d'évaluation consolidé de l'outil Scalpel pour cette session. Capture automatiquement l'empreinte technique (version du preset, commit Git, modèle, plateforme, ID de session) et consigne les blocages, refus inattendus, réussites et données nécessaires pour reproduire les anomalies dans le dossier unifié reports/bilans_scalpel/.",
+    parameters: {
+      type: 'object',
+      properties: {
+        task_objective: {
+          type: 'string',
+          description: "Description de l'objectif concret de la tâche réalisée."
+        },
+        verdict: {
+          type: 'string',
+          enum: ['success', 'partial', 'blocked', 'failed'],
+          description: "Verdict global sur le fonctionnement de Scalpel pour cette tâche (success, partial, blocked, failed)."
+        },
+        summary: {
+          type: 'string',
+          description: "Résumé concis de l'évaluation, des points clés et du comportement observé."
+        },
+        tool_call_counts: {
+          type: 'object',
+          description: "Comptes d'appels par outil Scalpel (ex: { read_block: 5, edit_block: 2 })."
+        },
+        blockages_and_refusals: {
+          type: 'array',
+          description: "Liste des blocages, refus inattendus ou erreurs rencontrés avec les outils Scalpel.",
+          items: {
+            type: 'object',
+            properties: {
+              tool: { type: 'string', description: "Nom de l'outil (read_block, edit_block, etc.)." },
+              target: { type: 'string', description: "Cible (chemin de fichier ou symbole)." },
+              nature: { type: 'string', description: "Nature du problème (refus_inattendu, conflit_hash, erreur_parse, hors_racine, etc.)." },
+              error_message: { type: 'string', description: "Message d'erreur ou de refus exact renvoyé par l'outil." },
+              context_call: { description: "Arguments passés lors de l'appel." },
+              workaround: { type: 'string', description: "Contournement utilisé ou indication du blocage." }
+            },
+            required: ['tool', 'nature', 'error_message']
+          }
+        },
+        reproduction_data: {
+          type: 'array',
+          description: "Données nécessaires pour reproduire les anomalies ou comportements inattendus.",
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: "Titre court du cas de reproduction." },
+              target_file: { type: 'string', description: "Chemin du fichier concerné." },
+              initial_state: { type: 'string', description: "État initial du bloc/fichier ou hash." },
+              tool_call: { description: "Nom de l'outil et arguments exacts (JSON)." },
+              expected: { type: 'string', description: "Comportement attendu." },
+              actual: { type: 'string', description: "Comportement obtenu." },
+              steps: { type: 'string', description: "Étapes textuelles de reproduction." }
+            },
+            required: ['title']
+          }
+        },
+        successes: {
+          type: 'array',
+          description: "Points forts et réussites constatés lors de la session.",
+          items: { type: 'string' }
+        },
+        recommendations: {
+          type: 'string',
+          description: "Recommandations et axes d'amélioration pour Scalpel."
+        }
+      },
+      required: ['task_objective', 'verdict', 'summary']
+    },
+    output: {
+      schema: OUTPUT_SCHEMA,
+      render: (_args, value) => textResult(value)
+    },
+    async execute(args, exec) {
+      const { saveScalpelReport } = await import('./report.js')
+      const ws = getSessionWorkspace(exec)
+      const res = saveScalpelReport(args, { exec, workspace: ws })
+      return {
+        status: 'success',
+        message: `Bilan Scalpel consolidé enregistré avec succès dans ${res.mdPath}`,
+        reportsDir: res.reportsDir,
+        jsonPath: res.jsonPath,
+        mdPath: res.mdPath,
+        verdict: res.report.verdict,
+        environment: res.report.environment
+      }
+    }
+  })
 
   // Repli hors index unifié dans read_block / edit_block / delete_block (Lot U)
   // 2. Commande slash /toolset [scalpel|standard|status] avec source v4 valide.

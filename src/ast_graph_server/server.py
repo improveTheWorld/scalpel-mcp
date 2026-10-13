@@ -78,6 +78,8 @@ def empty_document_list_note(
     c819545). This tool lists Markdown, Word and PDF documents; the index knows whether
     the pattern matched a source file instead, so the answer says which of the two it is.
     """
+    if hasattr(file_pattern, "default"):
+        file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
     matching = db.files_matching(file_pattern) if file_pattern else []
     if matching:
         sample = ", ".join(matching[:3])
@@ -191,6 +193,11 @@ def empty_document_search_note(
     `count 0` with an empty body in one run (base c980d51), each costing a manual
     widening by the agent, which said so: "no matches and no next-step guidance".
     """
+    if hasattr(file_pattern, "default"):
+        file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
+    if hasattr(query, "default"):
+        query = query.default if str(query.default) != "PydanticUndefined" else ""
+    query = str(query or "")
     if file_pattern:
         elsewhere = db.search_documents(query=query, limit=3)
         clause = _file_pattern_clause(db, file_pattern, on_disk)
@@ -417,6 +424,8 @@ class ASTGraphServer:
         that extension. Counting it turns a suspicion into the checked fact, and the agent
         asked for exactly that signal (declared on mapab2 a r1 of the base 93f3a9a).
         """
+        if hasattr(file_pattern, "default"):
+            file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
         if not file_pattern:
             return 0
         try:
@@ -1372,7 +1381,7 @@ class ASTGraphServer:
             ),
         )
         async def search_documents(
-            query: str = Field(default="", description="Search text (an empty query returns every paragraph)."),
+            query: str = Field(default="", description="Search text (an empty query lists all documents)."),
             path: Optional[str] = Field(default=None, description="Optional glob filter."),
             limit: int = Field(default=8, description="Maximum number of matches."),
             full_top: int = Field(
@@ -1393,15 +1402,35 @@ class ASTGraphServer:
                 ),
             ),
         ) -> Any:
-            if not query:
+            if hasattr(query, "default"):
+                query = query.default if str(query.default) != "PydanticUndefined" else ""
+            if hasattr(path, "default"):
+                path = path.default if str(path.default) != "PydanticUndefined" else None
+            if hasattr(limit, "default"):
+                limit = limit.default if str(limit.default) != "PydanticUndefined" else 8
+            if hasattr(full_top, "default"):
+                full_top = full_top.default if str(full_top.default) != "PydanticUndefined" else 2
+            if hasattr(include_content, "default"):
+                include_content = include_content.default if str(include_content.default) != "PydanticUndefined" else False
+            if hasattr(format, "default"):
+                format = format.default if str(format.default) != "PydanticUndefined" else "text"
+
+            query_str = str(query or "")
+            safe_limit = int(limit) if limit is not None else 8
+            safe_full_top = max(0, int(full_top)) if full_top is not None else 2
+            safe_include_content = bool(include_content)
+            safe_format = format if format in ("text", "json") else "text"
+
+            if not query_str:
                 # Sans requete, c est la LISTE COMPLETE des documents : search_documents absorbe
                 # list_documents. Une requete vide ne rend plus tous les paragraphes -- mesure :
                 # 289 documents = 33 057 caracteres, jamais tronques.
-                documents = self.db.list_documents(file_pattern=path, limit=limit)
+                list_limit = None if limit == 8 or limit is None else safe_limit
+                documents = self.db.list_documents(file_pattern=path, limit=list_limit)
                 listing = render_documents(documents)
                 if not documents:
                     listing = empty_document_list_note(self.db, path, self._disk_matches(path))
-                if format == "json":
+                if safe_format == "json":
                     return {
                         "status": "success",
                         "count": len(documents),
@@ -1411,18 +1440,24 @@ class ASTGraphServer:
                 return listing
 
             matches = self.db.search_documents(
-                query=query,
+                query=query_str,
                 file_pattern=path,
-                limit=limit,
-                include_content=include_content,
-                full_top=full_top,
+                limit=safe_limit,
+                include_content=safe_include_content,
+                full_top=safe_full_top,
                 # An inlined match longer than this is cut and flagged, so the
                 # caller knows to read that exact id in full if it matters.
                 max_content_chars=4000,
             )
+            mapping: Dict[str, List[str]] = {}
+            if matches:
+                for p in self.db.get_indexed_paths():
+                    mapping.setdefault(p.split("/")[-1], []).append(p)
+
             for match in matches:
-                match["referenced_files"] = self._referenced_files(
-                    match.get("content") or match.get("snippet")
+                text_content = match.get("content") or match.get("snippet")
+                match["referenced_files"] = (
+                    resolve_referenced_files(text_content, mapping) if text_content else []
                 )
                 # The stored id of a paragraph is a slug path; what the surface PRINTS is the
                 # heading chain, with a rank when two sibling headings share a title.
@@ -1430,10 +1465,14 @@ class ASTGraphServer:
                 displayed = self.patcher.displayed_section_id(stored_id)
                 match["displayed_id"] = displayed
                 match["section_id"] = displayed
-                if match.get("content") and not match.get("content_truncated"):
-                    metrics = self.patcher.block_metrics(displayed)
-                    if not metrics and stored_id:
-                        metrics = self.patcher.block_metrics(stored_id)
+                if match.get("content") is not None and not match.get("content_truncated"):
+                    metrics = None
+                    try:
+                        metrics = self.patcher.block_metrics(displayed)
+                        if not metrics and stored_id:
+                            metrics = self.patcher.block_metrics(stored_id)
+                    except Exception:
+                        metrics = None
                     if metrics:
                         match["content_hash"] = metrics["content_hash"]
                         match["line_count"] = metrics["line_count"]
@@ -1453,9 +1492,9 @@ class ASTGraphServer:
             if not matches:
                 # An empty answer must say what was checked, never nothing at all.
                 note = empty_document_search_note(
-                    self.db, query, path, self._disk_matches(path)
+                    self.db, query_str, path, self._disk_matches(path)
                 )
-            if format == "json":
+            if safe_format == "json":
                 payload: Dict[str, Any] = {"status": "success", "count": len(matches), "matches": matches}
                 if note:
                     payload["note"] = note

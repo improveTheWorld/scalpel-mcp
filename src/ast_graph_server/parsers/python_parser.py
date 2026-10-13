@@ -338,6 +338,29 @@ class PythonParser(BaseParser):
                         symbols=symbols,
                         calls=calls,
                     )
+            elif child.type in (
+                "block",
+                "if_statement",
+                "elif_clause",
+                "else_clause",
+                "try_statement",
+                "except_clause",
+                "finally_clause",
+                "with_statement",
+                "for_statement",
+                "while_statement",
+                "match_statement",
+                "case_clause",
+            ):
+                self._extract_symbols_and_calls(
+                    node=child,
+                    content=content,
+                    file_path=file_path,
+                    parent_id=parent_id,
+                    parent_name=parent_name,
+                    symbols=symbols,
+                    calls=calls,
+                )
             elif parent_id is None:
                 # Top-level assignments (constants and module variables)
                 target_node = None

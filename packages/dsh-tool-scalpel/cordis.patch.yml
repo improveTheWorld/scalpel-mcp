@@ -21,7 +21,7 @@
                 - search_symbols, search_documents, get_project_map, build_context : pour découvrir le code.
                 - edit_block, insert_block, delete_block : pour modifier le code avec sécurité de hash.
                 pwsh sert uniquement aux commandes système et tests, pas à lire/écrire les fichiers sources.
-                En fin de tâche ou sur demande de bilan, produis une section « Bilan Scalpel » détaillant les blocages, refus inattendus et réussites.
+                En fin de tâche ou sur demande de bilan, consigne obligatoirement un bilan consolidé via l'outil 'scalpel_report' (ou le script scripts/record_scalpel_eval.mjs). Renseigne précisément le verdict, les blocages, les refus inattendus, les réussites et inclus les données nécessaires pour reproduire (fichiers cibles, arguments d'outils, erreurs reçues).
               suffix: Your working directory is {{cwd}}. Scalpel opère dynamiquement sur ce workspace.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
@@ -125,7 +125,7 @@
                 - search_symbols, search_documents, get_project_map, build_context : pour découvrir le code.
                 - edit_block, insert_block, delete_block : pour modifier le code avec sécurité de hash.
                 pwsh sert uniquement aux commandes système et tests, pas à lire/écrire les fichiers sources.
-                En fin de tâche ou sur demande de bilan, produis une section « Bilan Scalpel » détaillant les blocages, refus inattendus et réussites.
+                En fin de tâche ou sur demande de bilan, consigne obligatoirement un bilan consolidé via l'outil 'scalpel_report' (ou le script scripts/record_scalpel_eval.mjs). Renseigne précisément le verdict, les blocages, les refus inattendus, les réussites et inclus les données nécessaires pour reproduire (fichiers cibles, arguments d'outils, erreurs reçues).
               suffix: Your working directory is {{cwd}}. Scalpel opère dynamiquement sur ce workspace.
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'

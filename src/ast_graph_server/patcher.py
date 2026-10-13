@@ -1204,6 +1204,8 @@ class Patcher:
                 lines.append("\n  Preamble:")
                 for pline in str(payload["numbered_text"]).splitlines():
                     lines.append("    " + pline)
+            elif payload.get("root_text_empty"):
+                lines.append("\n  (Preamble is empty: 0 lines before first heading. Read sections below with their addresses)")
         elif isinstance(children, list):
             for child in children:
                 lines.append(self._listing_entry_line(child))
@@ -2510,11 +2512,14 @@ class Patcher:
                 # run on base f831a4e: "the empty numbered_text field alongside a populated
                 # children array is ambiguous"). Say what the emptiness IS.
                 payload["root_text_empty"] = True
+                payload["preamble_line_count"] = 0
                 payload["actionable_hint"] = (
-                    "This file's own text -- the part no heading owns -- is EMPTY: every line of it "
+                    "This file's own text -- the preamble no heading owns -- is EMPTY (0 lines before first heading): every line of it "
                     "sits under a heading, and those paragraphs are the children below. Read the one "
                     "you need by its address, or pass several in read_block(paths=[...])."
                 )
+            else:
+                payload["preamble_line_count"] = len(str(payload["numbered_text"]).splitlines())
             if answer_format == "text":
                 return self._listing_answer(block_id, payload, answer_format)
             return payload
@@ -6130,15 +6135,16 @@ class Patcher:
                     "Refused: your content opens the heading '" + str(first["title"]) + "' at level "
                     + str(first["level"]) + ", which is not inside the block you are editing (level "
                     + str(block_level) + "). It would split '" + section_id + "' into two sections, and "
-                    "edit_block edits inside one block only. The file is left untouched."
+                    "edit_block edits inside one block only (one node in, one node out). The file is left untouched."
                 ),
                 "actionable_hint": (
-                    "A heading at this level is a SIBLING of it: call insert_block(parent='"
-                    + self.displayed_id(holder) + "', anchor='" + self.displayed_id(section_id)
-                    + "', text='" + str(first["title"])
-                    + "\\n<body>'), and the level and the number are derived. For a CHILD of it "
-                    "instead, call insert_block(parent='" + section_id + "', anchor='" + section_id + "', "
-                    "text=<title>\\n<body>). To edit this block's text, drop the heading."
+                    "An edit_block operation cannot simultaneously edit a section and split it by introducing a sibling heading. "
+                    "Decouple in two steps: "
+                    "1) Use edit_block(path='" + self.displayed_id(section_id) + "', ops=[...]) to update this section's text without the heading. "
+                    "2) Use insert_block(parent='" + self.displayed_id(holder) + "', anchor='" + self.displayed_id(section_id)
+                    + "', text='" + str(first["title"]) + "\\n<body>') to insert the sibling section right after it. "
+                    "For a CHILD instead, call insert_block(parent='" + section_id + "', anchor='" + section_id + "', "
+                    "text=<title>\\n<body>)."
                 ),
             }
         before = [int(item["level"]) for item in self._content_headings(text[target["body_start"] : target["section_end"]])]
@@ -7270,10 +7276,12 @@ class Patcher:
 
     def delete_block(
         self,
-        path: str,
+        path: Optional[str] = None,
         expected_heading: Optional[str] = None,
+        *,
+        paths: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Remove ONE block addressed by PATH, whichever kind it is.
+        """Remove ONE or SEVERAL blocks addressed by PATH or PATHS.
 
         The path is the one the surface PRINTS (`fichier.md::Section mere::Paragraphe`,
         `fichier.cs::Classe::Methode`): a block that reads back must also delete. The dispatch
@@ -7283,6 +7291,20 @@ class Patcher:
         a cause that was not merely unhelpful, it was FALSE. A directory and a document root get
         their own cause too, instead of the same "not found".
         """
+        if paths:
+            results = [self.delete_block(p) for p in paths]
+            all_ok = all(r.get("status") in ("success", "noop") for r in results)
+            return {
+                "status": "success" if all_ok else "error",
+                "results": results,
+                "deleted_count": sum(1 for r in results if r.get("status") == "success"),
+            }
+        if not path:
+            return {
+                "status": "error",
+                "error": "delete_block requires 'path' (one block) or 'paths' (several blocks). Neither was given.",
+                "actionable_hint": "delete_block(path=...) removes one block; delete_block(paths=[...]) removes several blocks at once.",
+            }
         resolved = self._resolve_displayed_path(path) if "::" in path else None
         target = resolved or path
         block = self._block_and_kind(target)
