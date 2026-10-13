@@ -150,3 +150,14 @@ Ce chantier répond au constat empirique mesuré sur les sessions DSH et consoli
 
 ### C. Automatisation de l'Épluchage Déterministe (`benchmarks/peeler.py`) — Fait (13/10/2026)
 * L'épluchage de chaque run n'est plus une contrainte contractuelle humaine : il est câblé nativement dans le runner (`benchmarks/runner.py`) et produit automatiquement un bilan JSON structuré (`<run>.peel.json`) sans aucun surcoût LLM.
+
+### D. Contrôle de la Profondeur d'Arbre (`depth` / `max_depth`) sur `read_block` et `get_project_map` — S2 / Ergonomie
+* **Origine & Besoin** :
+  * Lors d'un `read_block` sur un fichier ou un dossier volumineux, le listing complet déverse l'intégralité des sous-symboles ou sous-dossiers, ce qui peut saturer le budget de contexte de l'agent.
+  * À l'inverse, sur `get_project_map`, l'agent n'a actuellement que deux modes rigides (`names` = arborescence de fichiers seule, `structure` = mini-AST complet des fichiers pertinents).
+* **Pistes d'évolution proposées** :
+  1. **Paramètre `depth` / `max_depth` sur `read_block`** :
+     * Permettre de borner la profondeur de traversée syntaxique lors du listing d'un fichier (ex: `depth=1` pour n'obtenir que les classes et fonctions de premier niveau, `depth=2` pour inclure les méthodes et propriétés internes).
+     * Réduit drastiquement l'enveloppe de tokens lors de l'exploration initiale de fichiers à forte densité (contrôleurs, gros modules).
+  2. **Paramètre de profondeur sur `get_project_map`** :
+     * Offrir un contrôle explicite de la profondeur de scan des répertoires (`max_depth: int`), évitant de traverser en aveugle des arborescences de sous-dossiers profondes quand seule la macro-structure du dépôt intéresse l'agent.
