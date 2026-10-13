@@ -74,9 +74,9 @@ def test_markdown_h1_title_deduplication(tmp_path: Path):
 
 def test_vases_communicants_doc_budget_to_code(tmp_path: Path):
     """Vérifie le reversement automatique du budget document inutilisé vers les fichiers de code."""
-    # 10 fichiers de code sans aucun document.
+    # 6 fichiers de code sans aucun document.
     files_dict = {}
-    for i in range(10):
+    for i in range(6):
         files_dict[f"src/module_{i}.py"] = (
             f"class Module{i}Handler:\n"
             f"    def handle(self):\n"
@@ -86,16 +86,16 @@ def test_vases_communicants_doc_budget_to_code(tmp_path: Path):
     indexer.index_workspace()
 
     # budget_tokens = 200 => budget_chars = 800, fixed = 140, usable = 660.
-    # 10 fichiers * ~42 chars = ~420 chars.
-    # Sans vases communicants: doc_budget = 55% (363 chars) est réservé aux docs (qui n'existent pas)
-    # et file_budget = 45% (297 chars). 420 chars ne rentrent pas dans 297 chars -> troncature (7 fichiers max).
+    # 6 fichiers * ~72 chars = ~432 chars (restitution multi-lignes Lot 2).
+    # Sans vases communicants: doc_budget = 40% (264 chars) est réservé aux docs (qui n'existent pas)
+    # et code_budget = 60% (396 chars). 432 chars ne rentrent pas dans 396 chars -> troncature (5 fichiers max).
     # Avec vases communicants: doc_remainder (40% non consommé) est reversé au code -> budget effectif = 660 chars.
-    # Les 10 fichiers rentrent intégralement et result["truncated"] == False.
+    # Les 6 fichiers rentrent intégralement et result["truncated"] == False.
     result = db.get_project_map(budget_tokens=200)
     files = result.get("files", [])
     file_paths = [f["file_path"] for f in files]
 
-    assert len(file_paths) == 10, f"Tous les 10 fichiers devraient être packés grâce aux vases communicants, eu: {len(file_paths)}"
+    assert len(file_paths) == 6, f"Tous les 6 fichiers devraient être packés grâce aux vases communicants, eu: {len(file_paths)}"
     assert result.get("truncated") is False, "Le résultat ne devrait pas être tronqué grâce aux vases communicants"
 
 

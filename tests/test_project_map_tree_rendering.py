@@ -71,8 +71,9 @@ def test_render_project_map_tree_hierarchy_and_sections():
     
     # 'intro.md' ne doit pas porter le préfixe complet répété 'docs/guides/intro.md'
     assert "docs/guides/intro.md" not in result
-    assert "intro.md :: Guide de démarrage" in result
-
+    assert "intro.md (2 sections)" in result
+    assert "::Prérequis" in result
+    assert "::Installation" in result
     # 3. Vérification de l'arborescence des fichiers de code
     src_dir_lines = [l for l in lines if l.strip() == "src/"]
     assert len(src_dir_lines) == 1, f"Expected exactly 1 'src/' line, got: {src_dir_lines}"
@@ -81,8 +82,11 @@ def test_render_project_map_tree_hierarchy_and_sections():
     assert len(parser_dir_lines) == 1, f"Expected exactly 1 'parser/' line, got: {parser_dir_lines}"
     
     assert "src/parser/a.py" not in result
-    assert "a.py :: class A, class Token" in result
-    assert "b.py :: class B" in result
+    assert "a.py (2 symboles)" in result
+    assert "::class A" in result
+    assert "::class Token" in result
+    assert "b.py (1 symboles)" in result
+    assert "::class B" in result
 
 
 @pytest.mark.anyio
@@ -109,12 +113,14 @@ async def test_get_project_map_integration_tree_and_sections(tmp_path: Path):
     # Le dossier 'docs/' puis 'guides/'
     assert any(l.strip() == "docs/" for l in lines)
     assert any(l.strip() == "guides/" for l in lines)
-    assert any("intro.md" in l and "Prerequis" in l for l in lines)
+    assert any("intro.md" in l for l in lines)
+    assert any("::Prerequis" in l for l in lines)
 
     # Le dossier 'src/' puis 'parser/'
     assert any(l.strip() == "src/" for l in lines)
     assert any(l.strip() == "parser/" for l in lines)
-    assert any("a.py :: class ParserA" in l for l in lines)
+    assert any("a.py" in l for l in lines)
+    assert any("::class ParserA" in l for l in lines)
 
 
 @pytest.mark.anyio

@@ -945,6 +945,7 @@ class DatabaseManager:
         }
 
         import json
+        from .rendering import _format_doc_map_entry, _format_file_map_entry
 
         def cost_of(value: Dict[str, Any], text_form: str) -> str:
             """What one entry weighs ON THE WIRE in the format asked."""
@@ -1012,29 +1013,28 @@ class DatabaseManager:
                 if not path_matches(row["file_path"], file_pattern):
                     continue
                 sec_rows = conn.execute(
-                    "SELECT heading FROM document_sections WHERE document_id = ? ORDER BY order_index ASC LIMIT 6",
+                    "SELECT heading FROM document_sections WHERE document_id = ? ORDER BY order_index ASC LIMIT 7",
                     (row["id"],),
                 ).fetchall()
                 raw_headings = [s["heading"] for s in sec_rows if s["heading"]]
                 while raw_headings and row["title"] and raw_headings[0].strip().lower() == row["title"].strip().lower():
                     raw_headings.pop(0)
-                section_titles = raw_headings[:5]
+                section_titles = raw_headings[:6]
                 doc_value = {
                     "file_path": row["file_path"],
                     "title": row["title"],
                     "sections": row["section_count"],
                     "section_titles": section_titles,
                 }
-                sec_desc = ", ".join(section_titles) if section_titles else str(row["section_count"]) + " sections"
                 parts = row["file_path"].replace("\\", "/").strip("/").split("/")
                 if max_depth is not None and len(parts) > max_depth:
                     continue
-                doc_line = "  " + row["file_path"] + " :: " + (row["title"] or "") + " (" + sec_desc + ")"
+                doc_text = _format_doc_map_entry(parts[-1], doc_value, depth=len(parts))
                 doc_weight = compute_doc_weight(row["file_path"])
                 doc_score = (1.0 + 0.5 * (row["section_count"] or 0)) * doc_weight
                 doc_items.append(
                     {
-                        "line": cost_of(doc_value, doc_line),
+                        "line": cost_of(doc_value, doc_text),
                         "value": doc_value,
                         "score": doc_score,
                     }
@@ -1081,20 +1081,34 @@ class DatabaseManager:
                 calls_in = calls_in_map.get(fpath, 0)
                 p_weight = compute_path_weight(fpath)
                 score = (1.5 * sym_count + 0.1 * loc + 5.0 * calls_in) * p_weight
-                file_value = {"file_path": fpath, "symbols": names}
+                file_value = {
+                    "file_path": fpath,
+                    "symbols": names,
+                    "sym_count": sym_count,
+                    "loc": loc,
+                    "symbol_details": [
+                        {
+                            "kind": r["kind"],
+                            "name": r["name"],
+                            "start_line": r["start_line"],
+                            "end_line": r["end_line"],
+                        }
+                        for r in s_rows[:6]
+                    ],
+                }
+                file_text = _format_file_map_entry(parts[-1], file_value, depth=len(parts))
                 file_items.append(
                     {
-                        "line": cost_of(file_value, "  " + fpath + " :: " + ", ".join(names)),
+                        "line": cost_of(file_value, file_text),
                         "value": file_value,
                         "score": score,
                     }
                 )
-
         # 4. Budget allocation via communicating vessels
         fixed = (
             len(json.dumps({**result, "documents": [], "files": []}, indent=2, ensure_ascii=False)) + 120
             if answer_format == "json"
-            else 140
+            else max(140, int(budget_chars * 0.03))
         )
         usable = max(0, budget_chars - fixed)
         doc_budget = int(usable * 0.40)

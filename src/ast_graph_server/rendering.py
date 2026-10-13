@@ -235,33 +235,84 @@ def _empty_map_section(payload: Dict[str, Any], kind: str) -> str:
     )
 
 
-def _format_doc_map_entry(filename: str, doc: Dict[str, Any], depth: int) -> str:
+def _format_doc_map_entry(filename: str, doc: Dict[str, Any], depth: int, max_sections: int = 6) -> str:
     indent = "  " * depth
-    title = str(doc.get("title") or "").strip()
-    sec_titles = doc.get("section_titles")
+    child_indent = indent + "  "
+
     secs = doc.get("sections")
+    sec_titles = doc.get("section_titles")
+    if sec_titles is None and isinstance(secs, list):
+        sec_titles = secs
+        total_sections = len(secs)
+    elif isinstance(secs, int):
+        total_sections = secs
+    else:
+        total_sections = len(sec_titles) if isinstance(sec_titles, list) else 0
 
-    sec_info = ""
+    lines = [f"{indent}{filename} ({total_sections} sections)"]
+
     if sec_titles and isinstance(sec_titles, list):
-        sec_info = " (" + ", ".join(str(s) for s in sec_titles) + ")"
-    elif isinstance(secs, list):
-        sec_info = " (" + ", ".join(str(s) for s in secs) + ")"
-    elif secs is not None:
-        sec_info = f" ({secs} sections)"
+        shown = sec_titles[:max_sections]
+        for heading in shown:
+            lines.append(f"{child_indent}::{heading}")
+        remaining = total_sections - len(shown)
+        if remaining > 0:
+            lines.append(f"{child_indent}::... (+{remaining} autres sections)")
 
-    if title:
-        return f"{indent}{filename} :: {title}{sec_info}"
-    elif sec_info:
-        return f"{indent}{filename}{sec_info}"
-    return f"{indent}{filename}"
+    return "\n".join(lines)
 
 
-def _format_file_map_entry(filename: str, entry: Dict[str, Any], depth: int) -> str:
+def _format_file_map_entry(
+    filename: str,
+    entry: Dict[str, Any],
+    depth: int,
+    max_symbols_per_file: int = 6,
+) -> str:
     indent = "  " * depth
-    symbols = ", ".join(str(name) for name in (entry.get("symbols") or []))
-    if symbols:
-        return f"{indent}{filename} :: {symbols}"
-    return f"{indent}{filename}"
+    child_indent = indent + "  "
+
+    sym_count = entry.get("sym_count")
+    symbol_details = entry.get("symbol_details")
+    raw_symbols = entry.get("symbols") or []
+
+    if sym_count is None:
+        if symbol_details is not None:
+            sym_count = len(symbol_details)
+        else:
+            sym_count = len(raw_symbols)
+
+    loc = entry.get("loc")
+    if loc is not None:
+        header = f"{indent}{filename} ({sym_count} symboles, {loc}L)"
+    else:
+        header = f"{indent}{filename} ({sym_count} symboles)"
+
+    lines = [header]
+
+    if symbol_details:
+        shown = symbol_details[:max_symbols_per_file]
+        for sym in shown:
+            kind = sym.get("kind") or ""
+            name = sym.get("name") or ""
+            prefix = f"{kind} {name}".strip()
+            start = sym.get("start_line")
+            end = sym.get("end_line")
+            if start is not None and end is not None:
+                lines.append(f"{child_indent}::{prefix} (L{start}-L{end})")
+            else:
+                lines.append(f"{child_indent}::{prefix}")
+        remaining = sym_count - len(shown)
+        if remaining > 0:
+            lines.append(f"{child_indent}::... (+{remaining} autres symboles)")
+    elif raw_symbols:
+        shown = raw_symbols[:max_symbols_per_file]
+        for sym in shown:
+            lines.append(f"{child_indent}::{sym}")
+        remaining = sym_count - len(shown)
+        if remaining > 0:
+            lines.append(f"{child_indent}::... (+{remaining} autres symboles)")
+
+    return "\n".join(lines)
 
 
 def _render_tree_entries(
@@ -296,7 +347,13 @@ def _render_tree_entries(
             lines.append(f"{indent}{dirname}/")
             _render_node(node.subdirs[dirname], depth + 1)
         for fname, it in sorted(node.files, key=lambda x: x[0]):
-            lines.append(format_entry(fname, it, depth))
+            formatted = format_entry(fname, it, depth)
+            if isinstance(formatted, list):
+                lines.extend(formatted)
+            elif "\n" in formatted:
+                lines.extend(formatted.splitlines())
+            else:
+                lines.append(formatted)
 
     _render_node(root, base_depth)
     return lines
