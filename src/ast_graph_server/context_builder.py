@@ -120,8 +120,19 @@ class ContextBuilder:
         cap = max_chars or self.MAX_CONTENT_CHARS
         if len(text) <= cap:
             return text
-        omitted = len(text) - cap
-        return text[: cap] + "\n[... " + str(omitted) + " chars omitted from this entry ...]"
+        cut_idx = text.rfind("\n", 0, cap)
+        if cut_idx == -1:
+            cut_idx = cap
+        cut_text = text[:cut_idx]
+        omitted = len(text) - len(cut_text)
+        shown_lines = len(cut_text.splitlines()) if cut_text else 0
+        total_lines = len(text.splitlines())
+        return (
+            cut_text
+            + "\n[... "
+            + str(omitted)
+            + f" chars omitted ({shown_lines}/{total_lines} lines shown) from this entry ...]"
+        )
 
     def _symbol_addresses(self, file_path: str) -> Dict[str, str]:
         """{stored symbol id -> printed address}, or {} when the patcher is not wired.
@@ -167,11 +178,18 @@ class ContextBuilder:
         stamp = str(metrics.get("content_hash") or "")
         cap = max_chars or self.MAX_CONTENT_CHARS
         if len(numbered) > cap:
-            omitted = len(numbered) - cap
+            cut_idx = numbered.rfind("\n", 0, cap)
+            if cut_idx == -1:
+                cut_idx = cap
+            cut_text = numbered[:cut_idx]
+            omitted = len(numbered) - len(cut_text)
+            shown_lines = len(cut_text.splitlines()) if cut_text else 0
+            total_lines = metrics.get("line_count")
+            if total_lines is None:
+                total_lines = len(numbered.splitlines())
             return (
-                address + "\n" + numbered[: cap]
-                + "\n[... " + str(omitted) + " chars omitted from this entry: the text is NOT "
-                "complete, so no hash is given ...]",
+                address + "\n" + cut_text
+                + "\n[... " + str(omitted) + f" chars omitted ({shown_lines}/{total_lines} lines shown): the text is NOT complete, so no hash is given; call read_block for complete block and hash ...]",
                 {},
             )
         return (
@@ -728,7 +746,7 @@ class ContextBuilder:
                 "deepen_min_score": tiering.deepen_min_score if tiering.enabled else None,
                 "low_tier_max_level": tiering.low_tier_max_level if tiering.enabled else None,
             },
-            "truncated_entry_count": sum(1 for entry in rendered if "chars omitted from this entry" in entry["text"]),
+            "truncated_entry_count": sum(1 for entry in rendered if "chars omitted" in entry["text"]),
             "entries": rendered,
             "text": text_block,
         }
