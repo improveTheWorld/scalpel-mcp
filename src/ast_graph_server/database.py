@@ -931,13 +931,11 @@ class DatabaseManager:
     ) -> Dict[str, Any]:
         """Return a compact, budgeted map of the indexed project.
 
-        The budget is split between documents and code symbols, and selection is
-        round-robin across directories, so a single large subtree (hundreds of
-        bug notes, for instance) cannot hide the rest of the repository.
+        The budget is dynamically balanced between documents and code symbols via
+        communicating vessels: unconsumed document budget flows into code budget.
+        Selection prioritizes core code and entry points over tests and archives.
         """
         budget_chars = max(800, int(budget_tokens) * 4)
-        doc_budget = int(budget_chars * 0.55)
-        file_budget = budget_chars - doc_budget
         result: Dict[str, Any] = {
             "budget_tokens": budget_tokens,
             "summary": {},
@@ -949,19 +947,35 @@ class DatabaseManager:
         import json
 
         def cost_of(value: Dict[str, Any], text_form: str) -> str:
-            """What one entry weighs ON THE WIRE in the format asked.
-
-            The selection used to count only `path :: title`: the text form adds the section
-            count, the JSON form adds its keys and its indentation (measured on this repository:
-            a 200-token request came back x1.13 in text and x1.63 in JSON).
-            """
+            """What one entry weighs ON THE WIRE in the format asked."""
             if answer_format == "json":
                 return json.dumps(value, indent=2, ensure_ascii=False).replace("\n", "\n    ") + ",\n    "
             return text_form + "\n"
 
+        def compute_path_weight(path: str) -> float:
+            norm = path.replace("\\", "/").lower()
+            parts = norm.split("/")
+            if any(part in ("tests", "test", ".archive", "archive") for part in parts) or "/tests/" in "/" + norm:
+                return 0.4
+            if parts[-1] in ("server.py", "main.py", "program.cs"):
+                return 2.0
+            if "src" in parts or norm.startswith("src/"):
+                return 1.5
+            return 1.0
+
+        def compute_doc_weight(path: str) -> float:
+            norm = path.replace("\\", "/").lower()
+            parts = norm.split("/")
+            if any(part in ("tests", "test", ".archive", "archive") for part in parts) or "/tests/" in "/" + norm:
+                return 0.4
+            if parts[-1] in ("readme.md", "index.md"):
+                return 2.0
+            if "docs" in parts or norm.startswith("docs/"):
+                return 1.5
+            return 1.0
+
         with self.get_connection() as conn:
-            # Every count is filtered by containment too: a summary that counts a row
-            # the listing refuses is a lie about the size of the project.
+            # Summary stats
             kind_rows = [
                 row for row in conn.execute("SELECT file_path, kind FROM symbols")
                 if self._inside_workspace(row["file_path"])
@@ -990,6 +1004,7 @@ class DatabaseManager:
                 "document_types": dict(sorted(types.items(), key=lambda item: -item[1])),
             }
 
+            # 1. Documents selection with H1 title deduplication
             doc_items: List[Dict[str, Any]] = []
             for row in conn.execute("SELECT id, file_path, title, section_count FROM documents ORDER BY file_path ASC"):
                 if not self._inside_workspace(row["file_path"]):
@@ -997,10 +1012,13 @@ class DatabaseManager:
                 if not path_matches(row["file_path"], file_pattern):
                     continue
                 sec_rows = conn.execute(
-                    "SELECT heading FROM document_sections WHERE document_id = ? ORDER BY order_index ASC LIMIT 5",
+                    "SELECT heading FROM document_sections WHERE document_id = ? ORDER BY order_index ASC LIMIT 6",
                     (row["id"],),
                 ).fetchall()
-                section_titles = [s["heading"] for s in sec_rows if s["heading"]]
+                raw_headings = [s["heading"] for s in sec_rows if s["heading"]]
+                while raw_headings and row["title"] and raw_headings[0].strip().lower() == row["title"].strip().lower():
+                    raw_headings.pop(0)
+                section_titles = raw_headings[:5]
                 doc_value = {
                     "file_path": row["file_path"],
                     "title": row["title"],
@@ -1012,58 +1030,110 @@ class DatabaseManager:
                 if max_depth is not None and len(parts) > max_depth:
                     continue
                 doc_line = "  " + row["file_path"] + " :: " + (row["title"] or "") + " (" + sec_desc + ")"
+                doc_weight = compute_doc_weight(row["file_path"])
+                doc_score = (1.0 + 0.5 * (row["section_count"] or 0)) * doc_weight
                 doc_items.append(
                     {
                         "line": cost_of(doc_value, doc_line),
                         "value": doc_value,
+                        "score": doc_score,
                     }
                 )
 
-            grouped: Dict[str, List[str]] = {}
-            for row in conn.execute(
-                "SELECT file_path, name, kind FROM symbols "
-                "WHERE kind IN ('class','interface','namespace','struct','record','enum') "
-                "ORDER BY file_path ASC, start_byte ASC"
+            # 2. Inbound call counts for centrality weighting
+            calls_in_map: Dict[str, int] = {}
+            for c_row in conn.execute(
+                """
+                SELECT s.file_path, count(*) as call_count
+                FROM symbol_calls sc
+                JOIN symbols s ON s.id = sc.callee_symbol_id
+                GROUP BY s.file_path
+                """
             ):
-                if not self._inside_workspace(row["file_path"]):
+                calls_in_map[c_row["file_path"]] = c_row["call_count"]
+
+            # 3. Root symbols selection without kind exclusion
+            file_syms: Dict[str, List[Dict[str, Any]]] = {}
+            for s_row in conn.execute(
+                """
+                SELECT file_path, name, kind, start_line, end_line 
+                FROM symbols 
+                WHERE (parent_id IS NULL OR parent_id = '')
+                  AND kind NOT IN ('variable', 'imports')
+                ORDER BY file_path ASC, start_byte ASC
+                """
+            ):
+                fpath = s_row["file_path"]
+                if not self._inside_workspace(fpath):
                     continue
-                grouped.setdefault(row["file_path"], []).append(row["kind"] + " " + row["name"])
+                file_syms.setdefault(fpath, []).append(s_row)
+
             file_items: List[Dict[str, Any]] = []
-            for fpath, names in grouped.items():
+            for fpath, s_rows in file_syms.items():
                 if not path_matches(fpath, file_pattern):
                     continue
                 parts = fpath.replace("\\", "/").strip("/").split("/")
                 if max_depth is not None and len(parts) > max_depth:
                     continue
+                names = [r["kind"] + " " + r["name"] for r in s_rows]
+                sym_count = len(s_rows)
+                loc = sum(max(0, r["end_line"] - r["start_line"] + 1) for r in s_rows)
+                calls_in = calls_in_map.get(fpath, 0)
+                p_weight = compute_path_weight(fpath)
+                score = (1.5 * sym_count + 0.1 * loc + 5.0 * calls_in) * p_weight
                 file_value = {"file_path": fpath, "symbols": names}
                 file_items.append(
-                    {"line": cost_of(file_value, "  " + fpath + " :: " + ", ".join(names)), "value": file_value}
+                    {
+                        "line": cost_of(file_value, "  " + fpath + " :: " + ", ".join(names)),
+                        "value": file_value,
+                        "score": score,
+                    }
                 )
 
-        def group_of(value: Dict[str, Any]) -> str:
-            return str(Path(value["file_path"]).parent).replace("\\", "/")
-
-        # The budget bounds what is RETURNED, in the format asked: every entry was weighed as it is
-        # rendered (see cost_of), and what surrounds the entries -- the header lines, or the JSON
-        # summary -- is paid first, out of the same budget.
+        # 4. Budget allocation via communicating vessels
         fixed = (
             len(json.dumps({**result, "documents": [], "files": []}, indent=2, ensure_ascii=False)) + 120
             if answer_format == "json"
             else 140
         )
         usable = max(0, budget_chars - fixed)
-        doc_budget = int(usable * 0.55)
-        file_budget = usable - doc_budget
-        documents, used_docs, trunc_docs = self._balanced_pick(doc_items, group_of, doc_budget)
-        files, used_files, trunc_files = self._balanced_pick(file_items, group_of, file_budget)
+        doc_budget = int(usable * 0.40)
+        code_budget = usable - doc_budget
+
+        # Pack documents by descending score
+        doc_items.sort(key=lambda item: (-item.get("score", 0.0), item["value"]["file_path"]))
+        documents: List[Dict[str, Any]] = []
+        used_docs = 0
+        trunc_docs = False
+        for it in doc_items:
+            cost = len(it["line"])
+            if used_docs + cost <= doc_budget:
+                documents.append(it["value"])
+                used_docs += cost
+            else:
+                trunc_docs = True
+
+        # Transfer unconsumed document budget to code budget
+        doc_remainder = max(0, doc_budget - used_docs)
+        effective_code_budget = code_budget + doc_remainder
+
+        # Pack code files by descending score until remaining budget is saturated
+        file_items.sort(key=lambda item: (-item.get("score", 0.0), item["value"]["file_path"]))
+        files: List[Dict[str, Any]] = []
+        used_files = 0
+        trunc_files = False
+        for it in file_items:
+            cost = len(it["line"])
+            if used_files + cost <= effective_code_budget:
+                files.append(it["value"])
+                used_files += cost
+            else:
+                trunc_files = True
+
         result["documents"] = documents
         result["files"] = files
         result["truncated"] = trunc_docs or trunc_files
         result["used_tokens_estimate"] = (used_docs + used_files + fixed) // 4
-        # An empty section under a filter is not an answer: the map says which files the
-        # pattern did select, so a script it cannot list is told apart from a wrong path
-        # (declared on mapab2 b r2 of the base c819545: "I could not confirm whether those
-        # two scripts exist on disk from this output").
         if file_pattern:
             result["file_pattern"] = file_pattern
             result["filtered_files"] = len(self.files_matching(file_pattern))

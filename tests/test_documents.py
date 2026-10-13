@@ -444,7 +444,7 @@ async def test_an_empty_project_map_section_says_what_the_filter_selected(tmp_pa
     it says that instead of leaving the section blank.
     """
     ws, config, db, indexer = make_env(
-        tmp_path, {"docs/spec.md": MD, "src/helper.py": "def f():\n    return 1\n"}
+        tmp_path, {"docs/spec.md": MD, "src/helper.py": "x = 1\n"}
     )
     server = ASTGraphServer(config)
     server.initialize(enable_watcher=False)
