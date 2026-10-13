@@ -446,25 +446,53 @@ class DatabaseManager:
                     ],
                 )
 
+    SEMANTIC_KIND_WEIGHTS: Dict[str, float] = {
+        # Code symbols: x 1.5
+        "class": 1.5,
+        "interface": 1.5,
+        "method": 1.5,
+        "function": 1.5,
+        "struct": 1.5,
+        "record": 1.5,
+        "enum": 1.5,
+        # Documentation: x 1.0
+        "section": 1.0,
+        "document": 1.0,
+        # JSON properties and scalars: x 0.3
+        "property": 0.3,
+        "array": 0.3,
+        "string": 0.3,
+        "number": 0.3,
+        "boolean": 0.3,
+        "variable": 0.3,
+    }
+
     def search_index(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
         """BM25 search over the ontology. Higher score means more relevant."""
         if not query or not query.strip():
             return []
+        fetch_limit = max(limit * 3, 100)
         with self.get_connection() as conn:
             rows = conn.execute(
                 "SELECT kind, ref_id, file_path, bm25(search_index) AS score "
                 "FROM search_index WHERE search_index MATCH ? ORDER BY score LIMIT ?",
-                (query, limit),
+                (query, fetch_limit),
             ).fetchall()
-            return [
-                {
-                    "kind": row["kind"],
-                    "ref_id": row["ref_id"],
-                    "file_path": row["file_path"],
-                    "score": -float(row["score"]),
-                }
-                for row in rows
-            ]
+            results = []
+            for row in rows:
+                kind = row["kind"]
+                raw_score = -float(row["score"])
+                weight = self.SEMANTIC_KIND_WEIGHTS.get(kind, 1.0)
+                results.append(
+                    {
+                        "kind": kind,
+                        "ref_id": row["ref_id"],
+                        "file_path": row["file_path"],
+                        "score": raw_score * weight,
+                    }
+                )
+            results.sort(key=lambda item: item["score"], reverse=True)
+            return results[:limit]
 
     def get_search_meta(self, ref_id: str) -> Optional[Dict[str, str]]:
         """Look up the kind and file of a search-index reference."""

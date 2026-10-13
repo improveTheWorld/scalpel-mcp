@@ -96,7 +96,7 @@ class Indexer:
         # Split FIRST, normalise second: ntpath.normcase turns "/" into "\\", so
         # splitting the normalised string would yield one part and match nothing.
         raw = rel_posix.replace("\\", "/")
-        rel = os.path.normcase(raw)
+        rel = os.path.normcase(raw).replace("\\", "/")
         parts = [os.path.normcase(part) for part in raw.split("/")]
         for index, matcher in enumerate(compiled):
             if matcher.match(rel):
@@ -425,7 +425,7 @@ class Indexer:
                 body += "\n" + symbol.docstring
             entries.append(
                 {
-                    "kind": "symbol",
+                    "kind": symbol.kind or "symbol",
                     "ref_id": symbol.id,
                     "file_path": rel_posix,
                     "title": symbol.name,

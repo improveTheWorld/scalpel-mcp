@@ -327,7 +327,7 @@ class ContextBuilder:
             return self._render_cache[cache_key]
 
         res = None
-        if kind == "symbol":
+        if kind == "symbol" or kind not in ("section", "document"):
             symbol = self._get_cached_symbol(ref_id)
             if symbol:
                 res = self._symbol_text(symbol, level, max_chars=max_chars)
@@ -353,7 +353,7 @@ class ContextBuilder:
         sections_by_doc: Dict[str, List[ContextEntry]] = {}
 
         for entry in entries:
-            if entry.kind == "symbol":
+            if entry.kind not in ("section", "document"):
                 sym = self._get_cached_symbol(entry.ref_id)
                 if sym and sym.file_path:
                     symbols_by_file.setdefault(str(sym.file_path), []).append(entry)
@@ -668,7 +668,7 @@ class ContextBuilder:
         rendered: List[Dict[str, Any]] = []
         for entry in ordered:
             item: Dict[str, Any] = {
-                "kind": entry.kind,
+                "kind": "symbol" if entry.kind not in ("section", "document") else entry.kind,
                 # The address the caller can USE, not the storage id: one grammar, everywhere.
                 "ref_id": printed_refs.get(entry.ref_id) or self._printed_ref(entry.ref_id),
                 "level": entry.level,
@@ -753,7 +753,7 @@ class ContextBuilder:
         for file_path, items in groups.items():
             lines.append("File: " + file_path)
             for entry, member in items:
-                label = "code" if entry.get("kind") == "symbol" else "doc"
+                label = "doc" if entry.get("kind") in ("section", "document") else "code"
                 level = str(entry.get("level", 0))
                 tag = "[" + label + " L" + level + "]"
                 stamp = entry.get("content_hash")

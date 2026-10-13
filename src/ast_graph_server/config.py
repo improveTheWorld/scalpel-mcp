@@ -48,6 +48,12 @@ class ServerConfig:
             ".work*",
             ".benchmark-work*",
             "*.zip",
+            "reports",
+            "reports/*",
+            "transcripts",
+            "transcripts/*",
+            "benchmarks/results",
+            "benchmarks/results/*",
             # Secret material: never indexed, so it can never reach a Dossier.
             # Measured on the benchmark repository: DataLinq.Enterprise/.secrets.md
             # and snowflake/secret.md were indexed and listed in the project map,

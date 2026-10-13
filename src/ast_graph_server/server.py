@@ -1299,7 +1299,7 @@ class ASTGraphServer:
                 ),
             ),
             max_entries_per_file: Optional[int] = Field(
-                default=None,
+                default=5,
                 description=(
                     "Maximum entries allowed per source file or document (prevents a single "
                     "document from monopolizing the context budget)."
@@ -1331,6 +1331,7 @@ class ASTGraphServer:
                     resolved_map_tokens = min(resolved_map_tokens, max_map_tokens)
                 if resolved_map_detail == "names":
                     resolved_map_detail = map
+            resolved_max_entries_per_file = 5 if max_entries_per_file is None else int(max_entries_per_file)
             payload = self.context_builder.build(
                 query=query,
                 budget_tokens=resolved_budget,
@@ -1340,7 +1341,7 @@ class ASTGraphServer:
                 map_tokens=resolved_map_tokens,
                 map_detail=resolved_map_detail,
                 min_score=resolved_min_score,
-                max_entries_per_file=max_entries_per_file,
+                max_entries_per_file=resolved_max_entries_per_file,
                 max_content_chars=max_content_chars,
                 format=format,
             )
