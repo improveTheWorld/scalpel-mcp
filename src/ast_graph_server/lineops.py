@@ -80,7 +80,6 @@ def apply_ops(
     total = len(lines)
 
     actions: List[Tuple[int, int, List[str], int]] = []
-    insert_points: Dict[int, int] = {}
 
     for index, op in enumerate(ops):
         if not isinstance(op, dict):
@@ -108,13 +107,7 @@ def apply_ops(
                 if position < 0 or position > total:
                     return OpResult(text, {"status": "error", "error":
                         "op " + str(index) + ": insert_after must be inside 0.." + str(total) + " (block-relative lines 0.." + str(total) + ", not absolute file line numbers)."})
-                if position in insert_points:
-                    return OpResult(text, {"status": "error", "error":
-                        "op " + str(index) + ": another insert already targets position " + str(position) + "."})
-                insert_points[position] = index
-                # The new lines take the place the *following* line occupies, so
-                # they align with it. Blank lines are skipped: a blank line carries
-                # no indentation, and using it put whole inserted blocks at column 0.
+                # Multiple inserts at the same position are permitted and applied in FIFO order.
                 column = (
                     _nearest_indent(lines, position, 1)
                     or _nearest_indent(lines, position - 1, -1)
@@ -143,8 +136,9 @@ def apply_ops(
     # found a misordered list whose heading had been replaced by the renumbered line that
     # was meant to follow it. A range edit therefore applies before an insertion at the
     # same index, whichever order the caller listed them in.
+    # Multiple inserts at the same index apply in caller order (FIFO).
     ordered = sorted(
-        actions, key=lambda item: (item[0], 0 if item[0] == item[1] else 1), reverse=True
+        actions, key=lambda item: (item[0], 0 if item[0] == item[1] else 1, item[3]), reverse=True
     )
     for start, end, replacement, _index in ordered:
         lines[start:end] = replacement
@@ -264,9 +258,14 @@ def format_single_edit_result(res: Dict[str, Any]) -> str:
     lc = res.get("line_count")
     lc_str = f" ({lc} lines)" if lc is not None else ""
 
-    header = f"[ok] {block_id}{h_str}{lc_str}"
+    is_noop = res.get("status") == "noop"
+    suffix = " (unchanged)" if is_noop else ""
+    header = f"[ok] {block_id}{h_str}{lc_str}{suffix}"
     lines = [header]
-    for w in res.get("warnings") or []:
+    all_warnings = list(res.get("warnings") or [])
+    if is_noop and res.get("message") and res.get("message") not in all_warnings:
+        all_warnings.append(str(res.get("message")))
+    for w in all_warnings:
         lines.append(f"  warning: {w}")
     snippet = res.get("diff_snippet")
     if snippet:
@@ -291,7 +290,7 @@ def format_batch_edit_result(res: Dict[str, Any]) -> str:
     lines.append("")
 
     for i, r in enumerate(results):
-        if isinstance(r, dict) and r.get("status") == "success":
+        if isinstance(r, dict) and r.get("status") in ("success", "noop"):
             lines.append(format_single_edit_result(r))
         elif isinstance(r, dict):
             idx = r.get("entry_index")

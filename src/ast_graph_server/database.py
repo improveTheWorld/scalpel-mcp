@@ -221,6 +221,15 @@ class DatabaseManager:
                     vector BLOB NOT NULL
                 );
 
+                -- Virtual table for document sections full-text search (BM25)
+                CREATE VIRTUAL TABLE IF NOT EXISTS document_sections_fts USING fts5(
+                    section_id UNINDEXED,
+                    document_id UNINDEXED,
+                    heading,
+                    content,
+                    tokenize = 'unicode61'
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
                 CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(file_path);
                 CREATE INDEX IF NOT EXISTS idx_sections_document ON document_sections(document_id);
@@ -657,6 +666,7 @@ class DatabaseManager:
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM documents WHERE file_path = ?", (file_path,))
+                conn.execute("DELETE FROM document_sections_fts WHERE document_id = ?", (file_path,))
                 conn.execute(
                     """
                     INSERT INTO documents (id, file_path, doc_type, title, section_count, content_hash)
@@ -678,12 +688,20 @@ class DatabaseManager:
                         """,
                         (section_id, file_path, section.heading, section.level, order_index, section.content, section_hash),
                     )
+                    conn.execute(
+                        """
+                        INSERT INTO document_sections_fts (section_id, document_id, heading, content)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (section_id, file_path, section.heading, section.content),
+                    )
 
     def delete_document(self, file_path: str) -> None:
         """Remove a document and its sections."""
         with self.get_connection() as conn:
             with conn:
                 conn.execute("DELETE FROM documents WHERE file_path = ?", (file_path,))
+                conn.execute("DELETE FROM document_sections_fts WHERE document_id = ?", (file_path,))
 
     def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
         """Fetch document metadata by workspace-relative path."""
@@ -701,6 +719,17 @@ class DatabaseManager:
                 (normalized,),
             ).fetchall()
         return [dict(row) for row in rows]
+    def find_enclosing_symbol(self, file_path: str, line: int) -> Optional[Dict[str, Any]]:
+        """Find the innermost symbol enclosing a 1-based file line number."""
+        normalized = str(file_path).replace("\\", "/")
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, kind, name, parent_id, start_line, end_line, start_byte, end_byte, content_hash "
+                "FROM symbols WHERE file_path = ? AND start_line <= ? AND end_line >= ? "
+                "ORDER BY (end_line - start_line) ASC, (end_byte - start_byte) ASC LIMIT 1",
+                (normalized, line, line),
+            ).fetchall()
+        return dict(rows[0]) if rows else None
 
     def list_documents(self, file_pattern: Optional[str] = None, limit: Optional[int] = 200) -> List[Dict[str, Any]]:
         """List indexed documents with their title and section count."""
@@ -803,16 +832,33 @@ class DatabaseManager:
                 break
         inlined = safe_full_top
         cap = safe_max_content_chars
-        for index, item in enumerate(results):
-            if not include_content and index >= inlined:
-                continue
-            section = self.get_document_section(item["section_id"]) or {}
-            content = section.get("content") or ""
-            item["content_total_chars"] = len(content)
-            if cap > 0 and len(content) > cap:
-                content = content[:cap]
-                item["content_truncated"] = True
-            item["content"] = content
+        sections_to_fetch = [
+            item["section_id"]
+            for index, item in enumerate(results)
+            if include_content or index < inlined
+        ]
+        if sections_to_fetch:
+            content_map: Dict[str, str] = {}
+            chunk_size = 900
+            with self.get_connection() as conn:
+                for i in range(0, len(sections_to_fetch), chunk_size):
+                    chunk = sections_to_fetch[i : i + chunk_size]
+                    placeholders = ",".join("?" for _ in chunk)
+                    chunk_rows = conn.execute(
+                        f"SELECT id, content FROM document_sections WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for r in chunk_rows:
+                        content_map[r["id"]] = r["content"] or ""
+            for index, item in enumerate(results):
+                if not include_content and index >= inlined:
+                    continue
+                content = content_map.get(item["section_id"], "")
+                item["content_total_chars"] = len(content)
+                if cap > 0 and len(content) > cap:
+                    content = content[:cap]
+                    item["content_truncated"] = True
+                item["content"] = content
         return results
 
     def get_document_sections(self, document_id: str, include_content: bool = False) -> List[Dict[str, Any]]:
@@ -881,6 +927,7 @@ class DatabaseManager:
         budget_tokens: int = 8000,
         file_pattern: Optional[str] = None,
         answer_format: str = "text",
+        max_depth: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Return a compact, budgeted map of the indexed project.
 
@@ -961,6 +1008,9 @@ class DatabaseManager:
                     "section_titles": section_titles,
                 }
                 sec_desc = ", ".join(section_titles) if section_titles else str(row["section_count"]) + " sections"
+                parts = row["file_path"].replace("\\", "/").strip("/").split("/")
+                if max_depth is not None and len(parts) > max_depth:
+                    continue
                 doc_line = "  " + row["file_path"] + " :: " + (row["title"] or "") + " (" + sec_desc + ")"
                 doc_items.append(
                     {
@@ -981,6 +1031,9 @@ class DatabaseManager:
             file_items: List[Dict[str, Any]] = []
             for fpath, names in grouped.items():
                 if not path_matches(fpath, file_pattern):
+                    continue
+                parts = fpath.replace("\\", "/").strip("/").split("/")
+                if max_depth is not None and len(parts) > max_depth:
                     continue
                 file_value = {"file_path": fpath, "symbols": names}
                 file_items.append(

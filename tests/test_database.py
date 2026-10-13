@@ -19,6 +19,7 @@ def test_schema_initialization(db: DatabaseManager) -> None:
         assert "symbols" in table_names
         assert "symbol_calls" in table_names
         assert "staged_changes" in table_names
+        assert "document_sections_fts" in table_names
 
 
 def test_upsert_and_search_symbols(db: DatabaseManager) -> None:
@@ -160,6 +161,35 @@ def test_search_symbols_matches_term_by_term(db: DatabaseManager) -> None:
 
     # A phrase that matches nothing still returns nothing, honestly.
     assert db.search_symbols("NowhereToBeFound") == []
+
+
+def test_document_sections_fts_indexing_and_cleanup(db: DatabaseManager) -> None:
+    """Document sections are indexed into document_sections_fts on upsert and cleaned up on delete."""
+    from ast_graph_server.documents import ParsedDocument, DocumentSection
+    doc = ParsedDocument(
+        doc_type="markdown",
+        title="Guide Test",
+        sections=[
+            DocumentSection(heading="Authentication Overview", level=1, order_index=0, content="OAuth2 tokens and flows"),
+            DocumentSection(heading="Configuration", level=2, order_index=1, content="Endpoint URL settings"),
+        ]
+    )
+    db.upsert_document("docs/guide.md", doc, content_hash="hash123")
+
+    with db.get_connection() as conn:
+        rows = conn.execute("SELECT * FROM document_sections_fts").fetchall()
+        assert len(rows) == 2
+        # FTS MATCH query
+        fts_match = conn.execute(
+            "SELECT section_id FROM document_sections_fts WHERE document_sections_fts MATCH 'OAuth2'"
+        ).fetchall()
+        assert len(fts_match) == 1
+
+    # Cleanup on delete
+    db.delete_document("docs/guide.md")
+    with db.get_connection() as conn:
+        rows_after = conn.execute("SELECT * FROM document_sections_fts").fetchall()
+        assert len(rows_after) == 0
 
 def test_search_symbols_accepts_a_bare_file_name(db: DatabaseManager) -> None:
     """`file_pattern="SparkContext.cs"` is what the caller holds; it must match.

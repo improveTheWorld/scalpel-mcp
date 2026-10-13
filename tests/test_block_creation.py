@@ -258,3 +258,26 @@ def test_a_code_file_refuses_a_child_and_names_insert_block(tmp_path: Path) -> N
     assert result["status"] == "error"
     assert "is a FILE" in result["error"]
     assert "insert_block" in result["actionable_hint"]
+
+
+def test_insert_block_preserves_trailing_newline_in_content(tmp_path: Path) -> None:
+    """insert_block strictly preserves trailing newline in created files."""
+    ws, db, patcher = make_env(tmp_path)
+
+    # 1. With explicit content ending in newline
+    content_with_nl = "def hello():\n    return True\n"
+    res1 = patcher.insert_block(parent="src", text="file_nl.py", content=content_with_nl)
+    assert res1["status"] == "success"
+    written1 = (ws / "src" / "file_nl.py").read_bytes()
+    assert written1 == content_with_nl.encode("utf-8")
+    assert written1.endswith(b"\n")
+    assert len(written1) == len(content_with_nl.encode("utf-8"))
+
+    # 2. With explicit content without newline
+    content_no_nl = "def hello():\n    return False"
+    res2 = patcher.insert_block(parent="src", text="file_no_nl.py", content=content_no_nl)
+    assert res2["status"] == "success"
+    written2 = (ws / "src" / "file_no_nl.py").read_bytes()
+    assert written2 == content_no_nl.encode("utf-8")
+    assert not written2.endswith(b"\n")
+

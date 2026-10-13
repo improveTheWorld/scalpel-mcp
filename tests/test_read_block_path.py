@@ -508,3 +508,18 @@ def test_a_bare_name_is_not_a_path_and_read_block_names_the_block(tmp_path: Path
     assert refused["status"] == "error", refused
     assert "is a NAME, not a path" in refused["error"]
     assert "src/a.py::A" in refused["actionable_hint"]
+
+
+def test_read_block_depth_parameter_on_directory_and_file(tmp_path: Path) -> None:
+    """read_block accepts depth to prune nested listing children."""
+    ws, db, patcher = make_env(tmp_path)
+
+    # 1. Directory listing with answer_format="json"
+    listing_dir = patcher.read_block("src", answer_format="json")
+    assert listing_dir["status"] == "success"
+    assert any(c["name"] == "a.py" for c in listing_dir["children"])
+
+    # 2. File listing with answer_format="json"
+    outline = patcher.read_block("src/a.py", answer_format="json")
+    assert outline["status"] == "success"
+    assert any(c["name"] == "A" for c in outline["children"])

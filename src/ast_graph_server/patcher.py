@@ -136,6 +136,8 @@ class Patcher:
         #: keeps a single call from ever writing to the table it reads.
         self._capturing_stamps = False
         self._batch_entry_index = 0
+        #: Short cache for markdown_layout results: (abs_path_str, content_hash) -> List[dict]
+        self._markdown_layout_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -557,7 +559,8 @@ class Patcher:
             if raw is None:
                 return None
             lossless = self._round_tripping_text(raw)
-            item = self._layout_item_at(markdown_layout(lossless), target["index"])
+            layout = self._get_markdown_layout(abs_path, raw, lossless)
+            item = self._layout_item_at(layout, target["index"])
             if item is None:
                 return None
             content, span = self._block_view(
@@ -582,7 +585,7 @@ class Patcher:
             if raw is None:
                 return None
             lossless = self._round_tripping_text(raw)
-            layout = markdown_layout(lossless)
+            layout = self._get_markdown_layout(abs_path, raw, lossless)
             target = self._layout_item_at(layout, section["order_index"])
             if target is None:
                 # A document with no heading at all is indexed as a single section
@@ -640,6 +643,19 @@ class Patcher:
             return Path(str(abs_path)).read_bytes()
         except OSError:
             return None
+
+    def _get_markdown_layout(self, abs_path: Path, raw_bytes: bytes, lossless_text: str) -> List[Dict[str, Any]]:
+        """Cached parsing of Markdown layout by (file_path, content_hash)."""
+        chash = compute_content_hash(raw_bytes)
+        key = (str(abs_path), chash)
+        if hasattr(self, "_markdown_layout_cache") and key in self._markdown_layout_cache:
+            return [dict(item) for item in self._markdown_layout_cache[key]]
+        layout = markdown_layout(lossless_text)
+        if hasattr(self, "_markdown_layout_cache"):
+            if len(self._markdown_layout_cache) > 200:
+                self._markdown_layout_cache.clear()
+            self._markdown_layout_cache[key] = layout
+        return [dict(item) for item in layout]
 
     @staticmethod
     def _layout_item_at(layout: List[dict], index: Any):
@@ -3351,10 +3367,12 @@ class Patcher:
         ]
         answers = [self.unify_addresses(answer, used=used) for answer in results]
         applied = sum(1 for answer in answers if answer.get("status") == "success")
+        noops = sum(1 for answer in answers if answer.get("status") == "noop")
+        refused = len(answers) - applied - noops
         return {
-            "status": "success" if applied else "error",
+            "status": "success" if (applied > 0 or (noops > 0 and refused == 0)) else "error",
             "applied": applied,
-            "refused": len(answers) - applied,
+            "refused": refused,
             "results": answers,
         }
     def _batch_entry(self, entry: Any, index: int) -> Dict[str, Any]:
@@ -6741,8 +6759,6 @@ class Patcher:
             parent_id = parent or ""
         if where is None and anchor is not None:
             where = anchor
-        if content is not None:
-            text = f"{text.strip()}\n{content}"
         # The PRINTED path (`fichier.md::Section mere::Paragraphe`) is the surface's own
         # vocabulary, so a parent named that way must seat the child exactly like the stored id
         # would. Resolution happens HERE, once, for every caller: `insert_block` and `read_block`
@@ -6761,7 +6777,11 @@ class Patcher:
         # to know any magic value.
         if where is None or where == "":
             where = parent_id
-        heading_text, body_text = self._split_block_text(text)
+        if content is not None:
+            heading_text = text.strip()
+            body_text = content
+        else:
+            heading_text, body_text = self._split_block_text(text)
         if not heading_text:
             return {
                 "status": "error",

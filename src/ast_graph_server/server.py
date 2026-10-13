@@ -1362,9 +1362,13 @@ class ASTGraphServer:
                     "which repeats derivable fields. json returns the structured payload."
                 ),
             ),
+            max_depth: Optional[int] = Field(
+                default=None,
+                description="Optional maximum directory path depth to include (e.g. 1 = root folder files only, 2 = root and immediate subfolders).",
+            ),
         ) -> Any:
             payload = self.db.get_project_map(
-                budget_tokens=budget_tokens, file_pattern=path, answer_format=format
+                budget_tokens=budget_tokens, file_pattern=path, answer_format=format, max_depth=max_depth
             )
             if format == "json":
                 return payload
@@ -1504,6 +1508,11 @@ class ASTGraphServer:
             if note:
                 text = note
             return text
+
+
+
+
+
 
 
 

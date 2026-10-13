@@ -115,3 +115,34 @@ async def test_get_project_map_integration_tree_and_sections(tmp_path: Path):
     assert any(l.strip() == "src/" for l in lines)
     assert any(l.strip() == "parser/" for l in lines)
     assert any("a.py :: class ParserA" in l for l in lines)
+
+
+@pytest.mark.anyio
+async def test_get_project_map_max_depth_filtering(tmp_path: Path):
+    from tests.test_documents import make_env
+    from ast_graph_server.server import ASTGraphServer
+
+    ws, config, db, indexer = make_env(
+        tmp_path,
+        {
+            "root_doc.md": "# Root Document\n",
+            "deep/sub/doc.md": "# Deep Document\n",
+            "root_file.py": "class RootClass:\n    pass\n",
+            "deep/sub/file.py": "class DeepClass:\n    pass\n",
+        },
+    )
+    server = ASTGraphServer(config)
+    server.initialize(enable_watcher=False)
+
+    # max_depth = 1 : only root-level files
+    res_depth1 = (await server.mcp.call_tool("get_project_map", {"budget_tokens": 1000, "max_depth": 1})).content[0].text
+    assert "root_doc.md" in res_depth1
+    assert "root_file.py" in res_depth1
+    assert "deep/" not in res_depth1
+    assert "sub/" not in res_depth1
+    assert "DeepClass" not in res_depth1
+    assert "Deep Document" not in res_depth1
+    # max_depth = None : all files
+    res_all = (await server.mcp.call_tool("get_project_map", {"budget_tokens": 1000})).content[0].text
+    assert "deep/" in res_all
+    assert "doc.md" in res_all

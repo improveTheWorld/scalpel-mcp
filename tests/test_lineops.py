@@ -69,8 +69,10 @@ def test_lineops_reject_overlap_and_out_of_range() -> None:
     assert apply_ops(text, [{"replace": [1, 2], "content": "x"}, {"delete": [2, 3]}], literal).error
     assert apply_ops(text, [{"replace": [1, 9], "content": "x"}], literal).error
     assert apply_ops(text, [{"delete": [0, 1]}], literal).error
-    # Two inserts at the same anchor are ambiguous.
-    assert apply_ops(text, [{"insert_after": 0, "content": "x"}, {"insert_after": 0, "content": "y"}], literal).error
+    # Two inserts at the same anchor are chained in FIFO order.
+    res = apply_ops(text, [{"insert_after": 0, "content": "x"}, {"insert_after": 0, "content": "y"}], literal)
+    assert res.error is None
+    assert res.text == "x\ny\na\nb\nc\n"
 
 
 def test_lineops_rebase_the_inserted_content() -> None:
@@ -677,3 +679,21 @@ def test_lineops_error_clarifies_block_relative_lines() -> None:
     res = apply_ops(text, [{"replace": [1, 99], "content": "x"}], literal)
     assert res.error is not None
     assert "block-relative lines 1..2, not absolute file line numbers" in res.error["error"]
+
+
+def test_multiple_inserts_at_same_anchor_and_empty_ops() -> None:
+    text = "first\nsecond\nthird\n"
+    # Empty ops return text unchanged without error
+    res_empty = apply_ops(text, [], literal)
+    assert res_empty.error is None
+    assert res_empty.text == text
+
+    # Multiple inserts at line 2 in FIFO order
+    ops = [
+        {"insert_after": 2, "content": "insA"},
+        {"insert_after": 2, "content": "insB"},
+        {"insert_after": 2, "content": "insC"},
+    ]
+    res_multi = apply_ops(text, ops, literal)
+    assert res_multi.error is None
+    assert res_multi.text == "first\nsecond\ninsA\ninsB\ninsC\nthird\n"

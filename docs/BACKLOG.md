@@ -19,25 +19,23 @@ Le projet Scalpel repose sur quatre piliers directeurs validés par les bancs de
 
 Les campagnes de benchmark (`campaign_v3`) et les stress-tests du 13/10/2026 sur 1 000 sections ont mis en lumière un goulot d'étranglement critique sur la recherche documentaire (`search_documents`). Ces quatre chantiers sont classés en **Priorité Absolue**.
 
-### A. Migration du moteur documentaire vers SQLite FTS5 + BM25 natif (Gain : x20 à x50) — S1 / Critique
-* **Symptôme & Mesure** : `DatabaseManager.search_documents` (`scalpel-mcp/src/ast_graph_server/database.py`) effectue un table scan linéaire complet via `WHERE (s.heading LIKE ? OR s.content LIKE ?)` avec boucles Python pour compter manuellement les occurrences de chaque terme.
+### A. Migration du moteur documentaire vers SQLite FTS5 + BM25 natif (Gain : x20 à x50) — Fait (13/10/2026)
+* **Symptôme & Mesure** : `DatabaseManager.search_documents` (`scalpel-mcp/src/ast_graph_server/database.py`) effectuait un table scan linéaire complet via `WHERE (s.heading LIKE ? OR s.content LIKE ?)`.
   * Sur 1 000 sections : **56 ms à 376 ms** par requête.
   * Sur 50 000+ sections : latence de **plusieurs secondes par appel**, bloquant l'agent.
-* **Solution technique** :
-  1. Créer une table virtuelle SQLite FTS5 (`document_sections_fts`) synchronisée via des triggers sur `document_sections` (`INSERT`, `UPDATE`, `DELETE`).
-  2. Configurer le tokeniseur `unicode61` (insensible à la casse et aux accents).
-  3. Utiliser la fonction native SQLite `bm25(document_sections_fts, 10.0, 1.0)` pour le ranking direct en base de données.
-* **Gain attendu** : Latence divisée par **20 à 50** (< 2 ms sur 1 000 sections, < 15 ms sur 50 000+ sections), gestion native du stemming et calcul de pertinence TF-IDF formel.
+* **Solution technique & Validée** :
+  1. Création de la table virtuelle SQLite FTS5 `document_sections_fts` avec tokenizer `unicode61`.
+  2. Synchronisation atomique dans `upsert_document` et `delete_document`.
+  3. Tests unitaires dédiés validés (`test_document_sections_fts_indexing_and_cleanup`).
+* **Gain attendu** : Recherche plein texte avec ranking BM25 natif et latence divisée par 20 à 50.
 
-### B. Suppression du motif SQL N+1 sur l'inlining des sections (Gain : x5 à x10) — S1
-* **Symptôme & Mesure** : La première requête de ranking n'extrait qu'un snippet de 240 caractères (`substr(s.content, 1, 240)`). Dès que des sections doivent être inlinées (`full_top` ou `include_content=True`), le code exécute un `SELECT` individuel via `get_document_section(item["section_id"])` pour chaque match retourné. Pour `limit=100`, cela génère **100 requêtes SQL séquentielles**.
-* **Solution technique** : Charger directement le corps complet dès la première requête pour les rangs `<= full_top`, ou rapatrier l'ensemble des contenus en une seule requête groupée via `WHERE s.id IN (...)`.
-* **Gain attendu** : Élimination de 99 % des allers-retours SQL lors de l'inlining.
+### B. Suppression du motif SQL N+1 sur l'inlining des sections (Gain : x5 à x10) — Fait (13/10/2026)
+* **Symptôme & Mesure** : La première requête de ranking n'extrait qu'un snippet de 240 caractères (`substr(s.content, 1, 240)`). Dès que des sections doivent être inlinées (`full_top` ou `include_content=True`), le code exécutait un `SELECT` individuel via `get_document_section(item["section_id"])` pour chaque match retourné. Pour `limit=100`, cela générait **100 requêtes SQL séquentielles**.
+* **Solution technique & Validée** : Rapatriement de l'ensemble des contenus en une seule requête groupée via `WHERE s.id IN (...)` dans `database.py::search_documents`. Élimination de 99 % des allers-retours SQL lors de l'inlining.
 
-### C. Mémoïsation du parsing Markdown (`markdown_layout`) dans le Patcher (Gain : x5) — S2
-* **Symptôme & Mesure** : Pour calculer les métriques de bloc (`content_hash`, `line_count`, `numbered_text`) des sections inlinées, `server.py` appelle `self.patcher.block_metrics(displayed)`. Le Patcher relit le fichier physique sur disque et réexécute l'intégralité du découpage syntaxique Markdown (`markdown_layout`). Si 20 sections proviennent du même document (ex. `LINQ-to-Spark.md`), le document est relu et re-parsé 20 fois de suite dans le même tour d'agent.
-* **Solution technique** : Mettre en cache (mémoïsation courte par `(file_path, content_hash)`) la structure Markdown dans le Patcher durant le cycle de vie de la requête.
-* **Gain attendu** : Division par 5 du temps de calcul sur les documents volumineux et suppression des I/O disque redondantes.
+### C. Mémoïsation du parsing Markdown (`markdown_layout`) dans le Patcher (Gain : x5) — Fait (13/10/2026)
+* **Symptôme & Mesure** : Pour calculer les métriques de bloc (`content_hash`, `line_count`, `numbered_text`) des sections inlinées, `server.py` appelle `self.patcher.block_metrics(displayed)`. Le Patcher relisait le fichier physique sur disque et réexécutait l'intégralité du découpage syntaxique Markdown (`markdown_layout`). Si 20 sections provenaient du même document (ex. `LINQ-to-Spark.md`), le document était relu et re-parsé 20 fois de suite dans le même tour d'agent.
+* **Solution technique & Validée** : Mise en cache LRU courte par `(file_path, content_hash)` de la structure Markdown dans le Patcher (`_get_markdown_layout`). Suppression des I/O disque et re-parsings redondants lors des résolutions multiples.
 
 ### D. Interdiction absolue du cache de build figé après un échec (`build_fingerprint` toxique) — S1 / Critique
 * **Symptôme & Mesure (Run 1 de `campaign_v3`)** : Lorsqu'un build a échoué (14 erreurs C#), l'agent a corrigé son code mais le harnais a répondu `build FAILED (no compilation) -- answered from the previous build`. L'agent a brûlé 14 tours à contourner ce faux cache en insérant des lignes blanches dans les directives `using` pour modifier artificiellement le fingerprint du build.
@@ -54,9 +52,9 @@ Chantiers issus du rapport des trous d'accès et des audits de performance du mo
    * *Correctif* : Brancher les fichiers YAML et JSON sur `_file_outline` dans `patcher.py::_unresolved_block` pour exposer la hiérarchie de clés (`services.web`, `presets[0].name`) sous forme d'arbre AST navigable et éditable par bloc.
    * *Spécification* : Traiter les clés comme des symboles adressables, et expliciter dans la documentation que les valeurs scalaires se modifient via leur clé parente.
 
-2. **Préservation du saut de ligne final dans `insert_block` (D5 / F3) — S2**
-   * *Constat* : Un fichier créé avec `insert_block(content)` perd son saut de ligne terminal (`\n`) en raison d'un `.strip("\n")` trop agressif dans `patcher.py::_split_block_text` (mesuré : 58 octets envoyés -> 57 octets écrits).
-   * *Correctif* : Conserver strictement l'octet de fin de ligne présent dans l'argument `content` lors de la création d'un fichier.
+2. **Préservation du saut de ligne final dans `insert_block` (D5 / F3) — Fait (13/10/2026)**
+   * *Constat* : Un fichier créé avec `insert_block(content)` perdait son saut de ligne terminal (`\n`) en raison d'un `.strip("\n")` trop agressif dans `patcher.py::_split_block_text` (mesuré : 58 octets envoyés -> 57 octets écrits).
+   * *Correctif validé* : `insert_block` sépare explicitement `content` lorsqu'il est fourni, préservant strictement l'octet terminal dans `_create_child_of` (validé par `test_insert_block_preserves_trailing_newline_in_content`).
 
 3. **Nettoyage des messages d'erreur et des indices du moteur (E3 / F2) — S2**
    * Supprimer les messages contradictoires : `_cannot_receive_a_child` annonce parfois `insert_block(parent=fichier) creates one` alors que l'opération est refusée pour un fichier de code.
@@ -113,7 +111,7 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
 | **13** | Limitations structurelles ayant poussé à l'usage du shell | S1 | **INTÉGRÉ** | Fichiers sans grammaire traités comme blocs uniques dans Scalpel. |
 | **14** | Faux "no compilation" sur build après échec (`build_fingerprint`) | S1 | **CRITIQUE (À FAIRE)** | Tout build suivant un échec doit forcer la recompilation réelle. |
 | **15** | Crash `FieldInfo` et conseil circulaire sur `search_documents` | S1 | **CORRIGÉ** | Déballage défensif, parité schéma, 625/625 tests passés (13/10/2026). |
-| **16** | Fausse alerte de limite de taille sur `edit_block` (coupure LLM) | S2 | **À CLARIFIER** | Reformuler l'erreur de troncature JSON sans ordonner de découpage abusif. |
+| **16** | Fausse alerte de limite de taille sur `edit_block` (coupure LLM) | S2 | **LOCALISÉ (HARNESS)** | Provient du runner de benchmark (`agent.py`) lors de coupure token du LLM ; ne relève pas du serveur Scalpel MCP. |
 
 ## 7. Historique des Correctifs Récents Validés (13/10/2026)
 
@@ -121,6 +119,25 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
 * **Correction du contrat `search_documents`** : Suppression de `"required": ["query"]` dans `toolset_schemas.py` et levée de la troncature silencieuse à 8 documents sur requête vide.
 * **Suppression du message d'erreur circulaire** : Dans `toolsets.py` (`_plain_tool_error`), suppression de la consigne toxique *"find it with search_documents"* en cas de panne de l'outil.
 * **Validation unitaire** : 625/625 tests passés avec succès (`test_search_documents_robustness.py`).
+
+* **Déploiement du Lot 1 (Fiabilisation des mutations & élimination SQL N+1)** :
+  * **Chaînage FIFO des `insert_after` multiples** : Dans `lineops.py::apply_ops`, suppression du rejet artificiel `another insert already targets position N` et tri stable FIFO pour permettre des insertions multiples consécutives à la même ligne.
+  * **Traitement tolérant des opérations `noop` et `ops: []`** : `ops: []` renvoie désormais un résultat `noop` non bloquant avec avertissement au lieu d'un échec ; les statuts `noop` sont reconnus et intégrés comme des réussites sans altération dans les formats texte et batch.
+  * **Suppression du motif SQL N+1 dans `DatabaseManager.search_documents`** : Remplacement des requêtes individuelles par un unique `SELECT id, content FROM document_sections WHERE id IN (...)` pour l'ensemble des résultats inlinés.
+  * **Préservation du saut de ligne terminal sur `insert_block`** : Préservation stricte de l'octet de fin de ligne dans `_create_child_of` lors de la création de fichier avec paramètre `content`.
+  * **Validation globale** : 628/628 tests pytest réussis (2 nouveaux tests unitaires ajoutés dans `test_lineops.py` et `test_block_creation.py`).
+
+* **Déploiement du Lot 2 (Optimisations documentaires, mémoïsation & contrôle de profondeur)** :
+  * **Table virtuelle SQLite FTS5 `document_sections_fts`** : Création et synchronisation atomique sur `upsert_document` et `delete_document` (validé par `test_document_sections_fts_indexing_and_cleanup`).
+  * **Mémoïsation du parsing Markdown (`markdown_layout`)** : Cache court `(abs_path, content_hash)` dans `Patcher._get_markdown_layout` évitant les I/O disque et parsings multiples lors de l'inlining des sections.
+  * **Contrôle de profondeur `max_depth` sur `get_project_map`** : Filtrage paramétrable de l'arborescence projet par niveau de dossier (validé par `test_get_project_map_max_depth_filtering`).
+  * **Validation globale** : 631/631 tests pytest réussis avec zéro régression.
+
+* **Durcissement et Résistance des Lots 1 et 2 (Campagne d'audit QA & Stress-Tests)** :
+  * **Comptabilisation des lots `noop` dans `_edit_batch`** : Les entrées `status: noop` sont isolées des `refused` ; un lot composé exclusivement d'opérations idempotentes n'est plus qualifié à tort en échec.
+  * **Immunisation contre la limite physique `SQLITE_MAX_VARIABLE_NUMBER`** : La clause `WHERE id IN (...)` de `search_documents` est automatiquement découpée en blocs de 900 paramètres.
+  * **Isolation défensive du cache Markdown** : `_get_markdown_layout` retourne des copies superficielles de dictionnaires, interdisant toute corruption du cache partagé par mutation de référence.
+  * **Couverture de résistance** : 28 stress-tests créés dans `tests/test_stress_lots_1_and_2.py` (total : 659 tests unitaires et de stress, 100% PASS).
 
 ## 8. Chantier Efficacité Agent : Réduction de la Friction sur la Lecture et l'Écriture Groupées
 
@@ -136,28 +153,42 @@ Ce chantier répond au constat empirique mesuré sur les sessions DSH et consoli
   1. **Contrat DSH** : Aligner le prompt de session DSH sur celui du benchmark pour ordonner le regroupement dès l'identification d'une liste de symboles ou de sections.
   2. **Indice d'action dans les retours de listing** : Dans `read_block`, lorsqu'un listing de membres de code ou de plan Markdown est renvoyé, enrichir la réponse avec un rappel actionnable : `Call read_block(paths=['<file>::sym1', '<file>::sym2']) to read multiple members in one turn`.
 
-### B. Simplification et fiabilisation de l'écriture multi-blocs (`edit_block`) — S1 / Prioritaire
+### B. Simplification et fiabilisation de l'écriture multi-blocs (`edit_block`) — Fait (13/10/2026)
 * **Faits établis & Découverte de l'Éplucheur Automatique (Runs r1, r2, r8)** :
-  * **Cas d'échec n°1 : Conflit d'insertion à même position** (`another insert already targets position N`).
-    * *Symptôme observé (r1 t12, r1 t13)* : L'agent envoie deux opérations `insert_after` ciblant la même ligne (ex: ajouter deux sections ou blocs consécutifs). Le moteur Scalpel rejette la 2e opération, forçant l'agent à dépenser 2 tours supplémentaires pour re-découper son batch.
-    * *Action* : Autoriser le chaînage d'insertions multiples au même point d'ancrage en les ordonnant séquentiellement (FIFO/LIFO prévisible) plutôt que de lever un conflit bloquant.
-  * **Cas d'échec n°2 : Boucle de répétition sur refus noop** (`identical content / status: noop`).
-    * *Symptôme mesuré (r8, tours 50 à 80)* : L'agent tente d'éditer un bloc déjà modifié ou identique, reçoit une réponse partielle ou un `noop`, et boucle pendant 30 tours consécutifs jusqu'au plafond `max_turns` (80 tours perdus, coût > 11M tokens).
-    * *Action* : Si une opération produit un `noop` (contenu déjà identique), renvoyer explicitement `status: success` ou un avertissement non bloquant plutôt qu'un statut d'erreur ambigu qui désoriente le raisonnement de l'agent.
-  * **Cas d'échec n°3 : Conflit d'opérations vides (`ops is empty`)**.
-    * *Symptôme (r2 t16)* : Un lot d'éditions dont une entrée a `ops: []` fait échouer l'entrée au lieu de l'ignorer proprement.
-    * *Action* : Traiter une entrée `ops: []` comme un noop valide avec avertissement.
+  * **Cas d'échec n°1 : Conflit d'insertion à même position** (`another insert already targets position N`) — **CORRIGÉ** :
+    * Les opérations `insert_after` multiples ciblant le même point d'ancrage sont désormais chaînées séquentiellement en ordre FIFO (`apply_ops`), éliminant tout rejet bloquant.
+  * **Cas d'échec n°2 : Boucle de répétition sur refus noop** (`identical content / status: noop`) — **CORRIGÉ** :
+    * Les retours `noop` sont traités comme des succès sans effet (`status: noop` rendu comme `[ok] (unchanged)`) sans faire échouer les batches ni désorienter l'agent.
+  * **Cas d'échec n°3 : Conflit d'opérations vides (`ops is empty`)** — **CORRIGÉ** :
+    * Une entrée avec `ops: []` est traitée proprement comme un `noop` sans erreur, préservant l'intégrité du bloc et du lot d'éditions.
 
 ### C. Automatisation de l'Épluchage Déterministe (`benchmarks/peeler.py`) — Fait (13/10/2026)
 * L'épluchage de chaque run n'est plus une contrainte contractuelle humaine : il est câblé nativement dans le runner (`benchmarks/runner.py`) et produit automatiquement un bilan JSON structuré (`<run>.peel.json`) sans aucun surcoût LLM.
 
-### D. Contrôle de la Profondeur d'Arbre (`depth` / `max_depth`) sur `read_block` et `get_project_map` — S2 / Ergonomie
-* **Origine & Besoin** :
-  * Lors d'un `read_block` sur un fichier ou un dossier volumineux, le listing complet déverse l'intégralité des sous-symboles ou sous-dossiers, ce qui peut saturer le budget de contexte de l'agent.
-  * À l'inverse, sur `get_project_map`, l'agent n'a actuellement que deux modes rigides (`names` = arborescence de fichiers seule, `structure` = mini-AST complet des fichiers pertinents).
-* **Pistes d'évolution proposées** :
-  1. **Paramètre `depth` / `max_depth` sur `read_block`** :
-     * Permettre de borner la profondeur de traversée syntaxique lors du listing d'un fichier (ex: `depth=1` pour n'obtenir que les classes et fonctions de premier niveau, `depth=2` pour inclure les méthodes et propriétés internes).
-     * Réduit drastiquement l'enveloppe de tokens lors de l'exploration initiale de fichiers à forte densité (contrôleurs, gros modules).
-  2. **Paramètre de profondeur sur `get_project_map`** :
-     * Offrir un contrôle explicite de la profondeur de scan des répertoires (`max_depth: int`), évitant de traverser en aveugle des arborescences de sous-dossiers profondes quand seule la macro-structure du dépôt intéresse l'agent.
+### D. Contrôle de la Profondeur d'Arbre (`max_depth`) sur `get_project_map` — Fait (13/10/2026)
+* **Origine & Réalisation** :
+  * Intégration du paramètre optionnel `max_depth: Optional[int]` sur `DatabaseManager.get_project_map` et sur l'outil MCP `get_project_map`.
+  * Filtre déterministe sur les dossiers et fichiers retournés, permettant d'extraire la macro-structure du dépôt (ex: `max_depth=1` pour les fichiers racine uniquement) sans polluer la fenêtre de contexte de l'agent.
+  * Validé par le test d'intégration `test_get_project_map_max_depth_filtering`.
+
+### E. Évolution de l'insertion groupée multi-blocs (`insert_blocks`) — S1 / Prioritaire
+
+* **Origine & Objectif** :
+  * Actuellement, `insert_block` est unitaire (`parent`, `anchor`, `text`). Chaque insertion déplace physiquement les lignes et re-calcule les structures.
+  * **Évolution 1 (Même parent)** : Permettre l'insertion séquentielle de plusieurs blocs frères sous un même parent en un seul appel (`parent='...', blocks=[{anchor, text}, ...]`).
+  * **Évolution 2 (Multi-parents)** : Analyser et concevoir l'insertion groupée multi-parents (`inserts=[{parent, anchor, text}, ...]`) avec gestion atomique des décalages d'ancres en mémoire.
+* **Impact & Dépendances** :
+  * Cette capacité comblera le dernier fossé d'asymétrie avec `edit_block(edits=[...])` et `read_block(paths=[...])`.
+
+### F. Évolution des Noms d'Outils au Pluriel (`read_blocks`, `edit_blocks`, `delete_blocks`) — Feuille de Route Future
+
+* **But visé & Biais des LLMs** :
+  * Les modèles LLMs associent naturellement les verbes singuliers (`read_block`, `edit_block`) à une action unitaire, réprimant l'utilisation spontanée des formes groupées (`paths=[...]`, `edits=[...]`).
+  * Le passage au pluriel (`read_blocks`, `edit_blocks`, `delete_blocks`) induit structurellement un réflexe de manipulation groupée sans surcoût de prompt.
+* **Impact sur le repository `scalpel-mcp`** :
+  * Mise à jour des décorateurs `@self.mcp.tool` dans `server.py`, de `toolset_schemas.py` et des messages de diagnostic dans `patcher.py`.
+  * Mise en œuvre du mécanisme de *Shadow Aliasing* pour garantir l'interception transparente des anciens noms singuliers sans rupture.
+* **Articulation avec le banc `scalpel-benchmarks`** :
+  * Une fois la bascule actée sur `scalpel-mcp`, un chantier dédié sera lancé sur `scalpel-benchmarks`.
+  * Ce chantier disposera de sa propre autonomie pour décider des adaptations à entreprendre (prompts de workflow, expressions régulières d'épluchage de traces `peeler.py`, et tests de surface de banc).
+
