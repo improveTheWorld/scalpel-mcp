@@ -7,7 +7,7 @@ import { apply } from '../lib/index.js'
 import { spawn } from 'node:child_process'
 
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python'
-const SCALPEL_ROOT = 'C:\\CodeSource\\Scalpel-mcp'
+const SCALPEL_ROOT = process.env.SCALPEL_ROOT || path.resolve(import.meta.dirname, '../../..')
 const RUNNER_PY = path.resolve(import.meta.dirname, '../lib/runner.py')
 
 function runScalpel(workspace, cmd, args) {

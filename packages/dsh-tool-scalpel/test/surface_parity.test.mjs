@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { apply } from '../lib/index.js'
 
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python'
-const SCALPEL_ROOT = 'C:\\CodeSource\\Scalpel-mcp'
+const SCALPEL_ROOT = process.env.SCALPEL_ROOT || path.resolve(import.meta.dirname, '../../..')
 const DIRECT_MCP_SCRIPT = path.resolve(SCALPEL_ROOT, 'packages/dsh-tool-scalpel/scripts/direct_mcp_call.py')
 const EXPORT_SCHEMAS_SCRIPT = path.resolve(SCALPEL_ROOT, 'packages/dsh-tool-scalpel/scripts/export_agent_schemas.py')
 

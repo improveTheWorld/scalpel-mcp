@@ -166,11 +166,18 @@ Ce chantier répond au constat empirique mesuré sur les sessions DSH et consoli
 ### C. Automatisation de l'Épluchage Déterministe (`benchmarks/peeler.py`) — Fait (13/10/2026)
 * L'épluchage de chaque run n'est plus une contrainte contractuelle humaine : il est câblé nativement dans le runner (`benchmarks/runner.py`) et produit automatiquement un bilan JSON structuré (`<run>.peel.json`) sans aucun surcoût LLM.
 
-### D. Contrôle de la Profondeur d'Arbre (`max_depth`) sur `get_project_map` — Fait (13/10/2026)
-* **Origine & Réalisation** :
-  * Intégration du paramètre optionnel `max_depth: Optional[int]` sur `DatabaseManager.get_project_map` et sur l'outil MCP `get_project_map`.
-  * Filtre déterministe sur les dossiers et fichiers retournés, permettant d'extraire la macro-structure du dépôt (ex: `max_depth=1` pour les fichiers racine uniquement) sans polluer la fenêtre de contexte de l'agent.
-  * Validé par le test d'intégration `test_get_project_map_max_depth_filtering`.
+### D. Refonte de `get_project_map` (Lots 1 & 2 validés, Lot 3 en réserve d'évolution) — Fait (13/10/2026)
+* **Lot 1 — Moteur de sélection, centralité & vases communicants (Fait)** :
+  * Désenclavement des fonctions pures et modules sans classe (`parent_id IS NULL`).
+  * Calcul de centralité via appels entrants indexés (`symbol_calls`), volume (LOC) et scoring de chemin.
+  * Vases communicants budgétaires : le quota documentation non consommé (40 %) est intégralement reversé au budget code, garantissant 100 % d'utilisation utile du budget.
+  * Déduplication du titre Markdown H1 en tête de section.
+* **Lot 2 — Rendu AST canonique avec adresses `::` par ligne (Fait)** :
+  * Élimination définitive des listes de sections plates à virgules et parenthèses ambiguës.
+  * Restitution hiérarchique avec syntaxe canonique d'adressage `::` sur chaque ligne, prête pour les appels d'outils Scalpel.
+  * Métriques de volume intégrées (`{loc}L`, `{sym_count} symboles`) et élagage anti-encombrement (`::... (+N autres symboles/sections)`).
+* **Lot 3 — Contrôle de la profondeur AST (`ast_depth`) (En réserve d'évolution)** :
+  * Possibilité d'exposer un paramètre `ast_depth: int` (0 = squelette, 1 = conteneurs/racines, 2 = méthodes détaillées) si le besoin d'affiner la granularité interne des très gros fichiers (> 7 000L) est empiriquement prouvé lors des prochaines campagnes. Consigné en réserve d'évolution.
 
 ### E. Évolution de l'insertion groupée multi-blocs (`insert_blocks`) — S1 / Prioritaire
 

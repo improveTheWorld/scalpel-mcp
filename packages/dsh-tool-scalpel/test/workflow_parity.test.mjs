@@ -8,7 +8,7 @@ import { loadContract, buildContractSection } from '../lib/toolset.js'
 import { apply } from '../lib/index.js'
 
 const PYTHON_PATH = process.env.PYTHON_PATH || 'python'
-const SCALPEL_ROOT = 'C:\\CodeSource\\Scalpel-mcp'
+const SCALPEL_ROOT = process.env.SCALPEL_ROOT || path.resolve(import.meta.dirname, '../../..')
 const EXPORT_WORKFLOW_SCRIPT = path.resolve(SCALPEL_ROOT, 'packages/dsh-tool-scalpel/scripts/export_agent_workflow.py')
 const WORKFLOW_JSON_PATH = path.resolve(SCALPEL_ROOT, 'packages/dsh-tool-scalpel/lib/agent_workflow.json')
 
