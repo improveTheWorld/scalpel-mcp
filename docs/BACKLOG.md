@@ -115,6 +115,10 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
 | **14** | Faux "no compilation" sur build après échec (`build_fingerprint`) | S1 | **CRITIQUE (À FAIRE)** | Tout build suivant un échec doit forcer la recompilation réelle. |
 | **15** | Crash `FieldInfo` et conseil circulaire sur `search_documents` | S1 | **CORRIGÉ** | Déballage défensif, parité schéma, 625/625 tests passés (13/10/2026). |
 | **16** | Fausse alerte de limite de taille sur `edit_block` (coupure LLM) | S2 | **LOCALISÉ (HARNESS)** | Provient du runner de benchmark (`agent.py`) lors de coupure token du LLM ; ne relève pas du serveur Scalpel MCP. |
+| **17** | `insert_after: 0` en Markdown insérant du texte hors-titre avant le `# Heading` (doublon `(2)`) | S2 | **CORRIGÉ** | Garde préventif dans `_edit_block_locked` : refuse avec `actionable_hint` vers `insert_after: 1` (14/10/2026). |
+| **18** | `read_block` d'une section Markdown parente n'exposant pas l'existence de sous-sections enfants | S2 | **CORRIGÉ** | `child_sections` exposé en JSON et ligne `children: N sub-section(s) under this heading (...)` ajoutée en texte (14/10/2026). |
+| **19** | Faux positif du warning `_blank_boundary_lost` sur les sections Markdown | S3 | **CORRIGÉ** | Désactivé sur `section`/`document` où `update_document_section` garantit déjà le séparateur de section (14/10/2026). |
+| **20** | Message `operation itself is unreadable` sur une plage simplement hors bornes en batch | S3 | **CORRIGÉ** | Distinction explicite `out_of_bounds: True` avec invitation à utiliser les numéros du `numbered_text` frais (14/10/2026). |
 
 ## 7. Historique des Correctifs Récents Validés (13/10/2026)
 
@@ -151,6 +155,11 @@ Suivi qualité systématique des anomalies signalées par les agents lors des ca
   * **Mode démon NDJSON (`packages/dsh-tool-scalpel/lib/runner.py`)** : Extraction de `dispatch_command(server, cfg, tool_schemas, cmd, args, mtime_cache, loop)` avec conservation à 100 % du mode CLI one-shot ; prise en charge des entrées de lot `args["edits"]` ; cache `(st_mtime_ns, st_size)` évitant les réindexations redondantes, invalidation post-mutation et nettoyage via `server.indexer.remove_file` en cas de suppression disque ; boucle `sys.stdin.readline()` sans buffering bloquant et isolation stricte de `sys.stdout`.
   * **Client démon persistant (`packages/dsh-tool-scalpel/lib/bridge.js`)** : Multiplexage NDJSON avec `ensureDaemon()` et `closeDaemon()`, gestion symétrique `ref()`/`unref()` + `pause()`/`resume()` des flux `stdio` lorsque `pendingRequests.size === 0` (zéro blocage de `node --test`), et résilience automatique sur timeout ou crash.
   * **Performance mesurée (`packages/dsh-tool-scalpel/test/bridge.test.mjs`)** : Latence chaude mesurée à **< 10 ms par appel** (contre > 200 ms en cold-start).
+* **Correctifs d'ergonomie post-campagne v0.4.0 (15 runs épluchés - 14/10/2026)** :
+  * **Garde préventif `insert_after: 0` sur section Markdown (`patcher.py::_edit_block_locked`)** : Refuse toute insertion `insert_after: 0` de contenu non-titre sur une section Markdown (qui plaçait le texte avant la ligne 1 `# Heading` et scindait la section en doublon `(2)`, coûtant 8 à 9 tours de réparation aux runs `r2` et `r11`), et guide immédiatement vers `insert_after: 1`.
+  * **Visibilité des sous-sections enfants dans `read_block` (`patcher.py::_read_block_locked` & `server.py`)** : Lorsqu'une section Markdown possède des sous-sections directes, `read_block` expose `child_sections` et affiche `children: N sub-section(s) under this heading (...)`, évitant les collisions de titres lors d'insertions ultérieures (runs `r4` et `r15`).
+  * **Suppression du faux positif `_blank_boundary_lost` en Markdown (`patcher.py`)** : Ne déclenche plus l'avertissement de perte de ligne blanche séparatrice sur les sections Markdown dont le séparateur est géré nativement par `update_document_section` (run `r13`).
+  * **Clarification des erreurs hors bornes en batch (`patcher.py::_batch_entry`)** : Sépare les plages hors bornes (`out_of_bounds: True`) des opérations malformées (`unreadable_operation: True`), et extrait proprement le message d'erreur JSON multi-lignes dans `peeler.py`.
 
 ## 8. Chantier Efficacité Agent : Réduction de la Friction sur la Lecture et l'Écriture Groupées
 
