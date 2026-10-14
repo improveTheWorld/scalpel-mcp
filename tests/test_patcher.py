@@ -70,16 +70,45 @@ def test_a_file_no_parser_claims_returns_its_text_read_only(
 
     assert payload["status"] == "success", payload
     assert payload["kind"] == "file_text"
-    assert payload["read_only"] is True
+    assert payload["read_only"] is False
     assert payload["numbered_text"].startswith("1 |")
     assert "param($Name)" in payload["numbered_text"]
     assert payload["content_hash"] and payload["line_count"] == 2
 
-    # READ-ONLY, and the write says so rather than pretending the path is a block.
-    refused = patcher.edit_block(
-        "scripts/deploy.ps1", ops=[{"replace": [1, 1], "content": "x"}]
+    stale = patcher.edit_block(
+        "scripts/deploy.ps1",
+        ops=[{"replace": [1, 1], "content": "param($Target)"}],
+        expected_hash="00000000",
     )
-    assert refused["status"] == "error"
+    assert stale["status"] == "error"
+
+    edited = patcher.edit_block(
+        "scripts/deploy.ps1",
+        ops=[{"replace": [1, 1], "content": "param($Target)"}],
+        expected_hash=payload["content_hash"],
+    )
+    assert edited["status"] == "success", edited
+    assert "param($Target)" in (scripts / "deploy.ps1").read_text(encoding="utf-8")
+
+    (workspace / ".gitignore").write_text("bin/\nobj/\n", encoding="utf-8")
+    gi_read = patcher.read_block(".gitignore")
+    batch = patcher.edit_block(
+        edits=[
+            {
+                "path": ".gitignore",
+                "expected_hash": gi_read["content_hash"],
+                "ops": [{"insert_after": 2, "content": "*.tmp"}],
+            },
+            {
+                "path": "scripts/deploy.ps1",
+                "expected_hash": edited["content_hash"],
+                "ops": [{"replace": [2, 2], "content": 'Write-Host "deployed $Target"'}],
+            },
+        ]
+    )
+    assert batch["status"] == "success" and batch["applied"] == 2, batch
+    assert "*.tmp" in (workspace / ".gitignore").read_text(encoding="utf-8")
+    assert 'Write-Host "deployed $Target"' in (scripts / "deploy.ps1").read_text(encoding="utf-8")
 
     # A file a PARSER claims is untouched by this door: still the outline, never its source.
     code = patcher.read_block("src/billing.py", answer_format="json")

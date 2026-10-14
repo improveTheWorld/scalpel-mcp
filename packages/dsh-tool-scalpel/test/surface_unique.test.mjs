@@ -188,7 +188,7 @@ test('5. Refus de mutation sous read-only (sécurité Lot S préservée)', async
 test('6. Vérification que read_unindexed et ses pairs n\'existent plus dans ctx.tools.register', () => {
   const h = createHarness();
   try {
-    assert.equal(h.tools.size, 8, 'Exactement 8 outils Scalpel doivent être enregistrés');
+    assert.equal(h.tools.size, 9, 'Exactement 9 outils Scalpel (8 AST + scalpel_report) doivent être enregistrés');
     assert.equal(h.tools.has('read_unindexed'), false, 'read_unindexed ne doit plus exister');
     assert.equal(h.tools.has('edit_unindexed'), false, 'edit_unindexed ne doit plus exister');
     assert.equal(h.tools.has('write_unindexed'), false, 'write_unindexed ne doit plus exister');
@@ -203,5 +203,62 @@ test('6. Vérification que read_unindexed et ses pairs n\'existent plus dans ctx
     }
   } finally {
     h.cleanup();
+  }
+});
+
+test('7. Intégration réelle Python (sans mock) : read_block et edit_block (unitaire + lot edits=[...]) sur .gitignore et pack.ps1', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'scalpel-u2-real-'));
+  const tools = new Map();
+  const fakeCtx = {
+    tools: { register: (t) => tools.set(t.name, t) },
+    inject: () => {}
+  };
+  apply(fakeCtx, {}, {
+    getSandboxPolicy: () => ({
+      resolve: () => ({ mode: 'workspace-write', workspaceRoot: ws })
+    })
+  });
+  const exec = {
+    agent: { session: { header: { cwd: ws }, id: 'session-u2-real' } }
+  };
+
+  try {
+    fs.writeFileSync(path.join(ws, '.gitignore'), 'obj/\nbin/\nscript*/\n', 'utf8');
+    fs.writeFileSync(path.join(ws, 'pack.ps1'), 'param([string]$Config = "Release")\nWrite-Host $Config\n', 'utf8');
+
+    const readTool = tools.get('read_block');
+    const editTool = tools.get('edit_block');
+
+    const rGit = await readTool.execute({ path: '.gitignore' }, exec);
+    const rPack = await readTool.execute({ path: 'pack.ps1' }, exec);
+    const hGit = (String(rGit).match(/\[h:([a-f0-9]{8})\]/) || [])[1];
+    const hPack = (String(rPack).match(/\[h:([a-f0-9]{8})\]/) || [])[1];
+    assert.ok(hGit, 'hash .gitignore présent');
+    assert.ok(hPack, 'hash pack.ps1 présent');
+
+    // Édition en lot edits=[...] sur .gitignore et pack.ps1 (cas exact de la session DataLinq)
+    const batchRes = await editTool.execute({
+      edits: [
+        {
+          path: '.gitignore',
+          expected_hash: hGit,
+          ops: [{ replace: [3, 3], content: 'scripts/archive/\n*.pid' }]
+        },
+        {
+          path: 'pack.ps1',
+          expected_hash: hPack,
+          ops: [{ replace: [2, 2], content: 'Write-Host "Packing $Config"' }]
+        }
+      ]
+    }, exec);
+
+    assert.equal(typeof batchRes, 'string');
+    assert.match(batchRes, /^\[ok\] applied 2\/2 edits:/);
+    assert.equal(fs.readFileSync(path.join(ws, '.gitignore'), 'utf8'), 'obj/\nbin/\nscripts/archive/\n*.pid\n');
+    assert.equal(fs.readFileSync(path.join(ws, 'pack.ps1'), 'utf8'), 'param([string]$Config = "Release")\nWrite-Host "Packing $Config"\n');
+  } finally {
+    const { closeDaemon } = await import('../lib/bridge.js');
+    closeDaemon();
+    try { fs.rmSync(ws, { recursive: true, force: true }); } catch {}
   }
 });

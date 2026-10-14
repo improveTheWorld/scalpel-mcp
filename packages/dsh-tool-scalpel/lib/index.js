@@ -122,22 +122,33 @@ export function apply(ctx, config, options = {}) {
     now: options.now
   })
 
+  function resyncAgent(agent) {
+    if (!agent?.session) return
+    try {
+      const { explicit, mode } = readModes(agent.session)
+      if (explicit === 'scalpel' || mode === 'scalpel') syncRestriction(agent, true)
+      else if (explicit === 'standard' || mode === 'standard') syncRestriction(agent, false)
+    } catch (err) {
+      ctx.logger?.warn?.('[toolset] resynchronisation des outils echouee: %o', err)
+    }
+  }
+
   // 0. Etat du jeu d'outils : projection de session repliee depuis le journal
   //    (source unique pour l'UI, le prompt systeme et la commande /status).
   ctx.inject(['sessionProjections'], (projCtx) => {
     // Enregistrement optionnel : sans registre de projections, le mode retombe sur le defaut du preset.
     projCtx.sessionProjections?.register?.(toolsetProjectionDefinition)
 
+    // Des la creation ou restauration d'un agent (avant meme le premier systemPrompt.assemble),
+    // appliquer la restriction d'outils correspondant au mode de la session.
+    projCtx.on?.('agent/created', (payload) => {
+      resyncAgent(payload?.agent ?? payload)
+    })
+
     // A la reprise d'une session (process neuf), la restriction en memoire est perdue :
     // on la reconstruit depuis le journal avant chaque etape.
     projCtx.on?.('agent/pre-step', async ({ agent }, next) => {
-      try {
-        const { explicit } = readModes(agent?.session)
-        if (explicit === 'scalpel') syncRestriction(agent, true)
-        else if (explicit === 'standard') syncRestriction(agent, false)
-      } catch (err) {
-        ctx.logger?.warn?.('[toolset] resynchronisation des outils echouee: %o', err)
-      }
+      resyncAgent(agent)
       return next()
     })
   })
@@ -167,11 +178,26 @@ export function apply(ctx, config, options = {}) {
       text: (assembleCtx) => {
         const session = assembleCtx?.agent?.session
         if (!session) return ''
+        resyncAgent(assembleCtx?.agent)
         if (readModes(session).mode !== 'scalpel') return ''
         const contract = loadContract()
         if (contract.error) ctx.logger?.warn?.('[toolset] contrat illisible: %s', contract.error)
         return buildContractSection(contract)
       }
+    })
+    // systemPrompt.assemble collecte toolProviders AVANT d'evaluer section.text et AVANT agent/pre-step.
+    // Ce waterfall garantit qu'au premier step apres un redemarrage, assembly.tools ne contient jamais
+    // les outils fichiers plats (read, edit, write, grep, glob) lorsque la session est en mode Scalpel.
+    promptCtx.on?.('system-prompt/assemble', async (assembly, assembleCtx, next) => {
+      const out = typeof next === 'function' ? await next() : assembly
+      const session = assembleCtx?.agent?.session
+      if (session && readModes(session).mode === 'scalpel') {
+        resyncAgent(assembleCtx.agent)
+        if (Array.isArray(out?.tools)) {
+          out.tools = out.tools.filter((t) => !FLAT_TOOLS.includes(t?.name))
+        }
+      }
+      return out
     })
   })
 
@@ -304,20 +330,49 @@ export function apply(ctx, config, options = {}) {
             }
           }
 
-          if (callToolFailed && typeof scalpelArgs?.path === 'string') {
-            const rawTarget = scalpelArgs.path.split('::')[0].split('#')[0]
-            const absPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(ws, rawTarget)
-            let isFile = false
-            try {
-              isFile = fs.statSync(absPath).isFile()
-            } catch {}
-            if (isFile) {
-              const fb = options.fileBlock || (await import('./file_block.js'))
-              return await fb.editFileBlock({
-                absPath,
-                ops: scalpelArgs.ops,
-                expectedHash: scalpelArgs.expected_hash
-              })
+          if (callToolFailed) {
+            if (typeof scalpelArgs?.path === 'string') {
+              const rawTarget = scalpelArgs.path.split('::')[0].split('#')[0]
+              const absPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(ws, rawTarget)
+              let isFile = false
+              try {
+                isFile = fs.statSync(absPath).isFile()
+              } catch {}
+              if (isFile) {
+                const fb = options.fileBlock || (await import('./file_block.js'))
+                return await fb.editFileBlock({
+                  absPath,
+                  ops: scalpelArgs.ops,
+                  expectedHash: scalpelArgs.expected_hash
+                })
+              }
+            } else if (Array.isArray(scalpelArgs?.edits) && scalpelArgs.edits.length > 0) {
+              const resolvedEntries = []
+              for (const entry of scalpelArgs.edits) {
+                if (!entry || typeof entry.path !== 'string') {
+                  resolvedEntries.length = 0
+                  break
+                }
+                const rawTarget = entry.path.split('::')[0].split('#')[0]
+                const absPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(ws, rawTarget)
+                let isFile = false
+                try {
+                  isFile = fs.statSync(absPath).isFile()
+                } catch {}
+                if (!isFile) {
+                  resolvedEntries.length = 0
+                  break
+                }
+                resolvedEntries.push({ absPath, ops: entry.ops, expectedHash: entry.expected_hash })
+              }
+              if (resolvedEntries.length === scalpelArgs.edits.length) {
+                const fb = options.fileBlock || (await import('./file_block.js'))
+                const out = []
+                for (const item of resolvedEntries) {
+                  out.push(await fb.editFileBlock(item))
+                }
+                return `[ok] applied ${out.length}/${out.length} edits:\n\n${out.join('\n\n')}`
+              }
             }
           }
 

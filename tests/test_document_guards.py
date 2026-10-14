@@ -255,7 +255,7 @@ def test_a_path_that_is_not_indexed_says_so(tmp_path: Path) -> None:
 
     script = patcher.read_block("docs/deploy.ps1")
     assert script["status"] == "success", script
-    assert script["read_only"] is True and script["kind"] == "file_text"
+    assert script["read_only"] is False and script["kind"] == "file_text"
     assert "Write-Host hi" in script["numbered_text"]
 
     missing = patcher.read_block("docs/nowhere.ps1")

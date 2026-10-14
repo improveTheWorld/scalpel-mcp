@@ -207,3 +207,17 @@ test('/toolset scalpel : un refus de restriction est une erreur (le mode ne doit
   assert.equal(res.kind, 'error')
   assert.equal(h.injected.length, 0)
 })
+
+test('reprise apres redemarrage : system-prompt/assemble et agent/created filtrent les outils plats AVANT pre-step', async () => {
+  const h = harness({ explicit: 'scalpel', preset: 'ptc' })
+  const a = h.agent('restart-step1')
+  const assembly = {
+    sections: [],
+    contexts: [],
+    tools: [{ name: 'read' }, { name: 'edit' }, { name: 'read_block' }, { name: 'pwsh' }],
+    variables: {}
+  }
+  const out = await h.handlers['system-prompt/assemble'](assembly, { agent: a }, async () => assembly)
+  assert.deepEqual(out.tools.map(t => t.name), ['read_block', 'pwsh'], 'aucun outil plat ne fuit dans assembly.tools au Step 1 apres redemarrage')
+  assert.equal(h.counts().restrictCalls, 1, 'la restriction sur agent.ctx.tools est egalement posee des system-prompt/assemble')
+})
