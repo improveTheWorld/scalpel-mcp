@@ -220,7 +220,13 @@ def _empty_map_section(payload: Dict[str, Any], kind: str) -> str:
     """
     pattern = payload.get("file_pattern")
     if not pattern:
-        return "  (none is indexed)" if kind == "document" else "  (none declares a container)"
+        if payload.get("workspace_empty"):
+            return (
+                "  (workspace directory is empty -- use insert_block(parent='.', text='<filename>', content='...') to create files)"
+                if kind == "file"
+                else "  (none -- workspace directory is empty)"
+            )
+        return "  (none is indexed)" if kind == "document" else "  (none declares a container; call read_block(path='.') to list all workspace files)"
     matched = payload.get("filtered_files") or 0
     if not matched:
         return "  (no indexed file matches '" + str(pattern) + "')"
@@ -282,7 +288,9 @@ def _format_file_map_entry(
             sym_count = len(raw_symbols)
 
     loc = entry.get("loc")
-    if loc is not None:
+    if entry.get("file_text_only") and sym_count == 0:
+        header = f"{indent}{filename} (file_text, {loc}L)" if loc is not None else f"{indent}{filename} (file_text)"
+    elif loc is not None:
         header = f"{indent}{filename} ({sym_count} symboles, {loc}L)"
     else:
         header = f"{indent}{filename} ({sym_count} symboles)"

@@ -156,6 +156,14 @@ def _get_or_create_server(servers: dict, workspace: str):
     cfg = ServerConfig.from_env(workspace_arg=workspace)
     cfg.answer_format = "text"
     server = ASTGraphServer(cfg)
+    try:
+        has_valid_index = any(
+            server.db._inside_workspace(p) for p in server.db.get_indexed_paths()
+        )
+        if not has_valid_index:
+            server.indexer.index_workspace(force=False)
+    except Exception:
+        pass
     mtime_cache = {}
     entry = (cfg, server, mtime_cache)
     servers[ws_key] = entry

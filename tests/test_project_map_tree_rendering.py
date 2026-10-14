@@ -152,3 +152,44 @@ async def test_get_project_map_max_depth_filtering(tmp_path: Path):
     res_all = (await server.mcp.call_tool("get_project_map", {"budget_tokens": 1000})).content[0].text
     assert "deep/" in res_all
     assert "doc.md" in res_all
+
+@pytest.mark.anyio
+async def test_get_project_map_auto_indexes_uninitialized_workspace_and_lists_file_text_fallbacks(tmp_path: Path):
+    from ast_graph_server.config import ServerConfig
+    from ast_graph_server.server import ASTGraphServer
+
+    # 1. Workspace avec du code et un doc mais SANS appel préalable à server.initialize()
+    ws1 = tmp_path / "fresh_ws"
+    ws1.mkdir()
+    (ws1 / "README.md").write_text("# Fresh Project\n\n## Intro\n\nHello.\n", encoding="utf-8")
+    (ws1 / "app.py").write_text("class FreshApp:\n    def start(self):\n        pass\n", encoding="utf-8")
+
+    cfg1 = ServerConfig(workspace_root=ws1, db_path=ws1 / ".agent_graph.db")
+    server1 = ASTGraphServer(cfg1)
+    # Aucun appel à server1.initialize() ! Simule le 1er tour d'un agent sur un nouveau workspace
+    text_map1 = (await server1.mcp.call_tool("get_project_map", {"budget_tokens": 2000})).content[0].text
+    assert "README.md" in text_map1
+    assert "::Intro" in text_map1
+    assert "app.py" in text_map1
+    assert "::class FreshApp" in text_map1
+
+    # 2. Workspace composé uniquement de scripts/fichiers sans conteneur AST (.ps1, .toml, JS IIFE)
+    ws2 = tmp_path / "scripts_ws"
+    ws2.mkdir()
+    (ws2 / "deploy.ps1").write_text("Write-Host 'Deploying'\nWrite-Host 'Done'\n", encoding="utf-8")
+    (ws2 / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+
+    cfg2 = ServerConfig(workspace_root=ws2, db_path=ws2 / ".agent_graph.db")
+    server2 = ASTGraphServer(cfg2)
+    text_map2 = (await server2.mcp.call_tool("get_project_map", {"budget_tokens": 2000})).content[0].text
+    assert "deploy.ps1 (file_text, 2L)" in text_map2
+    assert "pyproject.toml (file_text, 2L)" in text_map2
+    assert "(none declares a container" not in text_map2
+
+    # 3. Workspace réellement vide sur disque
+    ws3 = tmp_path / "empty_ws"
+    ws3.mkdir()
+    cfg3 = ServerConfig(workspace_root=ws3, db_path=ws3 / ".agent_graph.db")
+    server3 = ASTGraphServer(cfg3)
+    text_map3 = (await server3.mcp.call_tool("get_project_map", {"budget_tokens": 2000})).content[0].text
+    assert "workspace directory is empty" in text_map3

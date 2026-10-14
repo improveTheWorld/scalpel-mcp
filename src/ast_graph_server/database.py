@@ -1210,6 +1210,75 @@ class DatabaseManager:
                         "score": score,
                     }
                 )
+
+            # Fallback when no container/root symbol was extracted: surface indexed non-doc files
+            # and/or disk files in the workspace so a script-only or newly created workspace is
+            # never answered with a blind "(none declares a container)".
+            if not file_items and not file_pattern:
+                doc_paths_set = {row["file_path"] for row in doc_rows}
+                fallback_paths: List[str] = [
+                    r["file_path"]
+                    for r in conn.execute("SELECT file_path FROM indexed_files ORDER BY file_path ASC")
+                    if self._inside_workspace(r["file_path"]) and r["file_path"] not in doc_paths_set
+                ]
+                if not fallback_paths and self._root is not None and self._root.is_dir():
+                    try:
+                        seen_disk: List[str] = []
+                        for p in sorted(self._root.rglob("*")):
+                            if len(seen_disk) >= 100:
+                                break
+                            if not p.is_file():
+                                continue
+                            try:
+                                rel = p.relative_to(self._root).as_posix()
+                            except ValueError:
+                                continue
+                            if any(
+                                seg.startswith(".") or seg in ("node_modules", "__pycache__", "venv", ".venv", "bin", "obj", "dist", "build", "reports")
+                                for seg in rel.split("/")
+                            ):
+                                continue
+                            if rel not in doc_paths_set:
+                                seen_disk.append(rel)
+                        fallback_paths = seen_disk
+                    except Exception:
+                        fallback_paths = []
+                for fpath in fallback_paths:
+                    parts = fpath.replace("\\", "/").strip("/").split("/")
+                    if max_depth is not None and len(parts) > max_depth:
+                        continue
+                    loc = 0
+                    if self._root is not None:
+                        try:
+                            loc = len((self._root / fpath).read_bytes().splitlines())
+                        except Exception:
+                            loc = 0
+                    file_value = {
+                        "file_path": fpath,
+                        "symbols": [],
+                        "sym_count": 0,
+                        "loc": loc,
+                        "symbol_details": [],
+                        "file_text_only": True,
+                    }
+                    file_text = _format_file_map_entry(parts[-1], file_value, depth=len(parts))
+                    file_items.append(
+                        {
+                            "line": cost_of(file_value, file_text),
+                            "value": file_value,
+                            "score": 0.5 + 0.05 * loc,
+                        }
+                    )
+                if not doc_items and not file_items and self._root is not None and self._root.is_dir():
+                    try:
+                        has_any = any(
+                            not child.name.startswith(".")
+                            for child in self._root.iterdir()
+                        )
+                        if not has_any:
+                            result["workspace_empty"] = True
+                    except Exception:
+                        pass
         # 4. Budget allocation via communicating vessels
         fixed = (
             len(json.dumps({**result, "documents": [], "files": []}, indent=2, ensure_ascii=False)) + 120

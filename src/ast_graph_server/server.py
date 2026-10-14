@@ -563,6 +563,11 @@ class ASTGraphServer:
                 ),
             ),
         ) -> Any:
+            if not any(self.db._inside_workspace(p) for p in self.db.get_indexed_paths()):
+                try:
+                    self.indexer.index_workspace(force=False)
+                except Exception:
+                    pass
             matches = self.db.search_symbols(query=query, kind=kind, file_pattern=path, limit=limit)
             # The stored id of an overload carries a sha1 the caller can neither read nor
             # retype: the match is DISPLAYED under its printed path, and keyed internally by
@@ -1385,6 +1390,11 @@ class ASTGraphServer:
                 ),
             ),
         ) -> Any:
+            if not any(self.db._inside_workspace(p) for p in self.db.get_indexed_paths()):
+                try:
+                    self.indexer.index_workspace(force=False)
+                except Exception:
+                    pass
             resolved_budget = budget_tokens
             if detail_level is not None:
                 resolved_budget = self.context_builder.DETAIL_LEVEL_BUDGETS[int(detail_level)]
@@ -1443,6 +1453,11 @@ class ASTGraphServer:
                 description="Optional maximum directory path depth to include (e.g. 1 = root folder files only, 2 = root and immediate subfolders).",
             ),
         ) -> Any:
+            if not any(self.db._inside_workspace(p) for p in self.db.get_indexed_paths()):
+                try:
+                    self.indexer.index_workspace(force=False)
+                except Exception:
+                    pass
             payload = self.db.get_project_map(
                 budget_tokens=budget_tokens, file_pattern=path, answer_format=format, max_depth=max_depth
             )
@@ -1501,6 +1516,11 @@ class ASTGraphServer:
             safe_include_content = bool(include_content)
             safe_format = format if format in ("text", "json") else "text"
 
+            if not any(self.db._inside_workspace(p) for p in self.db.get_indexed_paths()):
+                try:
+                    self.indexer.index_workspace(force=False)
+                except Exception:
+                    pass
             if not query_str:
                 # Sans requete, c est la LISTE COMPLETE des documents : search_documents absorbe
                 # list_documents. Une requete vide ne rend plus tous les paragraphes -- mesure :
