@@ -569,7 +569,7 @@ class Patcher:
             )
             return (
                 "section",
-                {"file_path": document_id, "heading": target["heading"], "level": int(target["level"])},
+                {"file_path": document_id, "heading": target["heading"], "level": int(target["level"]), "order_index": target["index"]},
                 content,
                 abs_path,
                 raw,
@@ -599,7 +599,7 @@ class Patcher:
             )
             return (
                 "section",
-                {"file_path": section["document_id"], "heading": section["heading"], "level": section["level"]},
+                {"file_path": section["document_id"], "heading": section["heading"], "level": section["level"], "order_index": section["order_index"]},
                 content,
                 abs_path,
                 raw,
@@ -2338,11 +2338,10 @@ class Patcher:
             "bytes": len(raw),
             "content_hash": compute_content_hash(raw),
             "numbered_text": numbered(text, 1),
-            "read_only": True,
+            "read_only": False,
             "actionable_hint": (
-                "No parser claims this file, so its whole text is returned numbered from 1 -- and "
-                "it is READ-ONLY: nothing inside it is a block, so edit_block refuses this path. "
-                "Report a change here instead of attempting one."
+                "No parser claims this file, so its whole text is returned as a single block "
+                "numbered from 1, editable with edit_block(path='" + block_id + "', ...)."
             ),
         }
 
@@ -2592,6 +2591,26 @@ class Patcher:
             payload["heading"] = meta["heading"]
             payload["level"] = int(meta["level"])
             payload["chars"] = len(content)
+            try:
+                _abs_p, doc_text, _nl, doc_err = self._resolve_markdown(meta["file_path"])
+                if not doc_err and doc_text:
+                    layout = self._get_markdown_layout(_abs_p, doc_text.encode("utf-8"), doc_text)
+                    labels = self._section_labels(layout)
+                    sec_order = meta.get("order_index")
+                    pos = next((j for j, it in enumerate(layout) if it["index"] == sec_order), None)
+                    if pos is not None:
+                        sec_level = int(layout[pos]["level"])
+                        direct_children: List[str] = []
+                        for k in range(pos + 1, len(layout)):
+                            k_lvl = int(layout[k]["level"])
+                            if k_lvl <= sec_level:
+                                break
+                            if k_lvl == sec_level + 1:
+                                direct_children.append(labels[k])
+                        if direct_children:
+                            payload["child_sections"] = direct_children
+            except Exception:
+                pass
         else:
             payload["bytes"] = len(content.encode("utf-8"))
         return payload
@@ -2702,6 +2721,52 @@ class Patcher:
                 self._edits_lock.release(target)
         return self._edit_block_locked(block_id, ops, expected_hash)
 
+    def _file_text_block(self, block_id: str):
+        """Resolve a flat/unmapped file (or containerless code file) as a single 'file_text' block."""
+        if not block_id or "::" in block_id or "#" in block_id:
+            return None
+        if self._outside_the_workspace(block_id) or self._degenerate_id_refusal(block_id) is not None:
+            return None
+        abs_file = self._existing_path(block_id)
+        if abs_file is None or not abs_file.is_file():
+            return None
+        if self._is_markdown(block_id) or self._structured_summary(block_id, abs_file) is not None:
+            return None
+        rel_path = self._relative_path(abs_file)
+        indexer = getattr(self, "indexer", None)
+        if indexer is not None and indexer.ignore_pattern_for(rel_path) is not None:
+            return None
+        supported = getattr(indexer, "_is_supported", None)
+        is_supported = bool(supported is not None and (supported(rel_path) or supported(str(abs_file))))
+        if is_supported:
+            rows = self._symbol_rows(rel_path) or self._symbol_rows(block_id)
+            has_containers = any(
+                r.get("kind") in ("function", "class", "method", "interface", "struct", "record", "enum")
+                for r in rows
+            )
+            if has_containers:
+                return None
+        try:
+            raw = abs_file.read_bytes()
+        except OSError:
+            return None
+        if len(raw) > self.RAW_FILE_MAX_BYTES:
+            return None
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if not is_supported:
+                return None
+            content = raw.decode("utf-8", errors="replace")
+        return (
+            "file_text",
+            {"file_path": rel_path},
+            content,
+            abs_file,
+            raw,
+            (0, len(raw)),
+        )
+
     def _edit_block_locked(
         self,
         block_id: str,
@@ -2709,29 +2774,9 @@ class Patcher:
         expected_hash: Optional[str] = None,
     ) -> Dict[str, Any]:
         """edit_block, with the caller already alone in the file (see edit_block)."""
-        resolved = self._block_and_kind(block_id)
+        resolved = self._block_and_kind(block_id) or self._file_text_block(block_id)
         if resolved is None:
-            abs_file = self._existing_path(block_id)
-            if abs_file is not None and abs_file.is_file() and "::" not in block_id and "#" not in block_id:
-                indexer = getattr(self, "indexer", None)
-                supported = getattr(indexer, "_is_supported", None)
-                is_supported = (supported is not None and supported(str(abs_file)))
-                if is_supported:
-                    rows = self._symbol_rows(block_id)
-                    has_containers = any(r.get("kind") in ("function", "class", "method", "interface", "struct", "record", "enum") for r in rows)
-                    if not has_containers and not self._is_markdown(block_id) and self._structured_summary(block_id, abs_file) is None:
-                        raw = abs_file.read_bytes()
-                        content = raw.decode("utf-8", errors="replace")
-                        resolved = (
-                            "file_text",
-                            {"file_path": self._relative_path(abs_file)},
-                            content,
-                            abs_file,
-                            raw,
-                            (0, len(raw)),
-                        )
-            if resolved is None:
-                return self._unresolved_block(block_id, for_write=True)
+            return self._unresolved_block(block_id, for_write=True)
         kind, meta, content, _abs_path, _raw, _span = resolved
         # ONE resolver for the read AND the write: a path built from the names read_block
         # prints designates the same block here, and the write path below receives the
@@ -2846,6 +2891,29 @@ class Patcher:
                 ),
             }
 
+        if kind == "section":
+            for op_idx, one in enumerate(ops or []):
+                if isinstance(one, dict) and one.get("insert_after") == 0:
+                    frag = str(one.get("content") or "")
+                    if frag.strip() and self._leading_markdown_heading(frag) is None:
+                        return {
+                            "status": "error",
+                            "block_id": block_id,
+                            "error": (
+                                "Refused: op " + str(op_idx) + " uses insert_after: 0 on Markdown section '"
+                                + str(block_id) + "' with non-heading content. In a Markdown section, line 1 is "
+                                "the section heading itself: insert_after: 0 places content BEFORE the heading "
+                                "(above the section, splitting it into a duplicate section). Nothing was written."
+                            ),
+                            "content_hash": current_hash,
+                            "line_count": len(content.splitlines()),
+                            "numbered_text": numbered(content, 1),
+                            "actionable_hint": (
+                                "Use insert_after: 1 to insert at the start of the section body (right under "
+                                "the heading on line 1), or pass a '#' heading at line 0 if you intended to "
+                                "create a preceding sibling section."
+                            ),
+                        }
         applied = apply_ops(content, ops, lambda fragment, _column: fragment)
         if applied.error:
             error = dict(applied.error)
@@ -3065,7 +3133,11 @@ class Patcher:
                 warnings = list(result.get("warnings") or [])
                 warnings.append(insert_duplicate)
                 result["warnings"] = warnings
-            lost = self._blank_boundary_lost(ops, content)
+            lost = (
+                self._blank_boundary_lost(ops, content)
+                if kind not in ("section", "document")
+                else None
+            )
             if lost:
                 warnings = list(result.get("warnings") or [])
                 warnings.append(
@@ -3356,7 +3428,9 @@ class Patcher:
                 path_used = str(entry.get("path"))
                 if path_used and path_used not in self._call_state:
                     self._begin_block_state(
-                        path_used, self._block_and_kind(path_used) if path_used else None
+                        path_used,
+                        (self._block_and_kind(path_used) or self._file_text_block(path_used))
+                        if path_used else None,
                     )
                 results.append(self._batch_entry(entry, index))
             saved_batch_after = dict(self._batch_after) if self._batch_after else {}
@@ -3476,26 +3550,35 @@ class Patcher:
                     **fresh,
                 }
             if "translation" in trouble:
-                # AN OPERATION THE TOOL CANNOT READ IS NOT A CONFLICT, AND NOT A STALE READ.
-                # The rebaser answers LineTranslationError for two families: an aimed line it
-                # can no longer map (the real conflict, decided above), and a payload it cannot
-                # PARSE at all -- not an object, none of replace/delete/insert_after, a
-                # malformed or out-of-range span. Both used to leave through the ONE return
-                # above, so a batch of a SINGLE entry answered "the tool cannot know which one
-                # you meant to win: serving both would let the second overwrite a line the
-                # first already rewrote" about a second entry that did not exist, with
-                # `conflict: true` and `rebased_by: null` -- an accusation with no author,
-                # measured on six distinct payloads. The cause is neither of the brief's two:
-                # nothing about the caller stamp is wrong, and no other entry wrote the line.
-                # The operation itself could not be read, and NO line number the tool could
-                # return would repair it -- which is why the stale-read wording (and its
-                # "re-send against these numbers") is not used here either.
+                reason_str = str(trouble["translation"])
+                is_out_of_bounds = (
+                    "must be inside" in reason_str
+                    or "outside the version you read" in reason_str
+                    or "no longer exists" in reason_str
+                )
+                if is_out_of_bounds:
+                    return {
+                        "status": "error",
+                        "entry_index": index,
+                        "block_id": str(entry.get("path")),
+                        "error": (
+                            "Refused: " + reason_str + " Entry " + str(index)
+                            + " of this call targets a line number outside the bounds of '"
+                            + str(entry.get("path")) + "'. The refused entry wrote nothing."
+                        ),
+                        "out_of_bounds": True,
+                        "actionable_hint": (
+                            "Nothing was written for entry " + str(index) + ". Re-send it using"
+                            " the 1-based line numbers from the fresh numbered_text below."
+                        ),
+                        **fresh,
+                    }
                 return {
                     "status": "error",
                     "entry_index": index,
                     "block_id": str(entry.get("path")),
                     "error": (
-                        "Refused: " + str(trouble["translation"]) + " Entry " + str(index)
+                        "Refused: " + reason_str + " Entry " + str(index)
                         + " of this call carries an operation the tool cannot read, so it"
                         " cannot tell which lines that operation addresses. No other entry of this call wrote the"
                         " line: the operation itself is unreadable. The refused entry wrote"

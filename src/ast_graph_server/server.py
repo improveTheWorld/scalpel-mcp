@@ -766,6 +766,11 @@ class ASTGraphServer:
                     f"[h:{unified.get('content_hash')}] ({unified.get('line_count')} lines)"
                 )
                 parts = [header, unified["numbered_text"]]
+                if unified.get("child_sections"):
+                    children_list = ", ".join(str(c) for c in unified["child_sections"])
+                    parts.append(
+                        f"children: {len(unified['child_sections'])} sub-section(s) under this heading ({children_list})"
+                    )
                 if unified.get("address_hint"):
                     parts.append(f"hint: {unified['address_hint']}")
                 return "\n".join(parts)
