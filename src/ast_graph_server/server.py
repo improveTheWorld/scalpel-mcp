@@ -123,7 +123,11 @@ def _file_pattern_clause(db: DatabaseManager, file_pattern: str, on_disk: int = 
             "no indexed file matches that pattern (check the path; a folder scopes to "
             "its content)"
         )
-    return str(len(matching)) + " indexed file(s) match it and none carries the query"
+    return (
+        str(len(matching))
+        + " indexed file(s) match the path filter, and none declares a symbol matching the query "
+        "(none carries the query; the filter matches symbol declarations, not usages)"
+    )
 
 
 def empty_symbol_search_note(
@@ -920,24 +924,52 @@ class ASTGraphServer:
             # (every one carried an expected_hash), refused for want of a path and re-sent next
             # turn. An entry whose stamp names no block, or several, keeps its refusal below.
             # The top-level path of a ONE-entry call still wins (`inherits`, further down).
+            # A PATH TO A WHOLE CODE FILE WITH A UNIQUE CHILD SYMBOL HASH (#46):
+            # When the caller passes the enclosing file path (e.g. 'SparkConnectOptions.cs')
+            # together with an expected_hash that uniquely identifies a symbol inside that file,
+            # route the edit directly to that symbol instead of refusing with 'is a whole code file'.
+            if path and not edits and "::" not in path and "#" not in path and expected_hash:
+                abs_cand = self.patcher._existing_path(path)
+                if (
+                    abs_cand is not None
+                    and abs_cand.is_file()
+                    and self.patcher._file_outline(path, abs_cand) is not None
+                ):
+                    owner = self.patcher._unique_owner_of_hash(expected_hash)
+                    if owner and owner.split("::", 1)[0] == self.patcher._relative_path(abs_cand):
+                        path = owner
             inferred: Dict[int, str] = {}
             if edits and isinstance(edits, list):
                 lone_with_path = len(edits) == 1 and bool(path)
                 filled: List[Any] = []
                 for index, entry in enumerate(edits):
-                    if (
-                        isinstance(entry, dict)
-                        and not entry.get("path")
-                        and not lone_with_path
-                        and entry.get("expected_hash")
-                    ):
-                        owner = self.patcher._unique_owner_of_hash(entry.get("expected_hash"))
-                        if owner:
-                            updated_entry = dict(entry)
-                            updated_entry["path"] = owner
-                            inferred[index] = owner
-                            filled.append(updated_entry)
-                            continue
+                    if isinstance(entry, dict) and entry.get("expected_hash"):
+                        entry_path = entry.get("path") or (path if lone_with_path else None)
+                        if not entry.get("path") and not lone_with_path:
+                            owner = self.patcher._unique_owner_of_hash(entry.get("expected_hash"))
+                            if owner:
+                                updated_entry = dict(entry)
+                                updated_entry["path"] = owner
+                                inferred[index] = owner
+                                filled.append(updated_entry)
+                                continue
+                        elif (
+                            isinstance(entry_path, str)
+                            and "::" not in entry_path
+                            and "#" not in entry_path
+                        ):
+                            abs_cand = self.patcher._existing_path(entry_path)
+                            if (
+                                abs_cand is not None
+                                and abs_cand.is_file()
+                                and self.patcher._file_outline(entry_path, abs_cand) is not None
+                            ):
+                                owner = self.patcher._unique_owner_of_hash(entry.get("expected_hash"))
+                                if owner and owner.split("::", 1)[0] == self.patcher._relative_path(abs_cand):
+                                    updated_entry = dict(entry)
+                                    updated_entry["path"] = owner
+                                    filled.append(updated_entry)
+                                    continue
                     filled.append(entry)
                 edits = filled
             if edits:
@@ -1061,13 +1093,17 @@ class ASTGraphServer:
                         + "' was USED for it: this call holds ONE entry. Send that path inside the "
                         "entry when the call carries several."
                     ]
-                for index, owner in sorted(inferred.items()):
-                    if index < len(results) and isinstance(results[index], dict) and results[index].get("status") == "error":
-                        continue
-                    payload["warnings"] = list(payload.get("warnings") or []) + [
-                        "entry " + str(index) + " of edits carried no path: its expected_hash belongs "
-                        "to '" + owner + "', so the entry was addressed to it."
-                    ]
+                # #49: Only attach the informational inferred-path note on the JSON payload
+                # (kept for test_pathless_entry.py), and omit it from the text rendering where
+                # 40 repetitive warnings polluted campaign_v043 batch outputs.
+                if format == "json":
+                    for index, owner in sorted(inferred.items()):
+                        if index < len(results) and isinstance(results[index], dict) and results[index].get("status") == "error":
+                            continue
+                        payload["warnings"] = list(payload.get("warnings") or []) + [
+                            "entry " + str(index) + " of edits carried no path: its expected_hash belongs "
+                            "to '" + owner + "', so the entry was addressed to it."
+                        ]
                 # A batch refused WHOLE carries its own repair sentence ("every entry still
                 # matches the file, because nothing was written"), which the count below would
                 # throw away: the caller would have to re-derive that the retry is safe.
