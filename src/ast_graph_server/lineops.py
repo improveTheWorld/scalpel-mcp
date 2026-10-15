@@ -271,10 +271,29 @@ def format_single_edit_result(res: Dict[str, Any]) -> str:
         )
         host_h = str(res.get("host_content_hash") or chash)[:8]
         host_h_str = f" [h:{host_h}]" if host_h else ""
-        header = (
-            f"[ok] created sibling after {block_id} -> {created}{h_str}{lc_str} "
-            f"(host block unchanged{host_h_str})"
-        )
+        created_syms = res.get("created_symbols") or []
+        created_secs = res.get("created_block_ids") or res.get("created_section_ids") or []
+        if len(created_syms) > 1:
+            sym_list = ", ".join(
+                f"{s.get('id') or s.get('name')}"
+                + (f" [h:{str(s.get('content_hash'))[:8]}]" if s.get("content_hash") else "")
+                for s in created_syms
+            )
+            header = (
+                f"[ok] created {len(created_syms)} siblings after {block_id} -> {sym_list} "
+                f"(host block unchanged{host_h_str})"
+            )
+        elif len(created_secs) > 1:
+            sec_list = ", ".join(str(s) for s in created_secs)
+            header = (
+                f"[ok] created {len(created_secs)} siblings after {block_id} -> {sec_list}{h_str}{lc_str} "
+                f"(host block unchanged{host_h_str})"
+            )
+        else:
+            header = (
+                f"[ok] created sibling after {block_id} -> {created}{h_str}{lc_str} "
+                f"(host block unchanged{host_h_str})"
+            )
     else:
         header = f"[ok] {block_id}{h_str}{lc_str}{suffix}"
     lines = [header]

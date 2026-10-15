@@ -3005,6 +3005,51 @@ class Patcher:
                                 + ", or call insert_block(parent='" + str(block_id) + "', text=...)."
                             ),
                         }
+                # #44: insert_after BEFORE the closing '}' of a class/struct/interface/record
+                # (e.g. insert_after: len - 1) where the inserted content declares a new top-level
+                # type (enum, class, struct, record, interface) would silently nest that type inside
+                # the class instead of placing it as a sibling in the enclosing namespace/file.
+                if (
+                    isinstance(ins_pos, int)
+                    and 1 <= ins_pos < len(sym_lines)
+                    and sym_kind in ("class", "struct", "interface", "record")
+                ):
+                    frag = str(one.get("content") or "")
+                    first_meaningful = next(
+                        (
+                            ln.strip()
+                            for ln in frag.splitlines()
+                            if ln.strip() and not ln.strip().startswith(("//", "/*", "*", "#"))
+                        ),
+                        "",
+                    )
+                    m_type = re.match(
+                        r"^(?:(?:public|internal|private|protected|static|abstract|sealed|partial|readonly)\s+)*(enum|class|struct|interface|record)\s+(\w+)",
+                        first_meaningful,
+                    )
+                    if m_type:
+                        decl_kind, decl_name = m_type.group(1), m_type.group(2)
+                        return {
+                            "status": "error",
+                            "block_id": block_id,
+                            "error": (
+                                "Refused: op " + str(op_idx) + " uses insert_after: " + str(ins_pos)
+                                + " (inside " + sym_kind + " '" + str(block_id) + "', before its closing "
+                                "'}' on line " + str(len(sym_lines)) + ") to insert '" + decl_kind + " "
+                                + decl_name + "'. That would NEST '" + decl_name + "' inside '"
+                                + str(block_id) + "' instead of declaring it at namespace/file scope. "
+                                "Nothing was written."
+                            ),
+                            "offending_op": op_idx,
+                            "content_hash": current_hash,
+                            "line_count": len(sym_lines),
+                            "numbered_text": numbered(content, 1),
+                            "actionable_hint": (
+                                "To declare '" + decl_name + "' as a sibling type after '" + str(block_id)
+                                + "', use insert_after: " + str(len(sym_lines)) + " (the closing '}' line "
+                                "of '" + str(block_id) + "', without adding an extra closing '}' for the class)."
+                            ),
+                        }
                 # #36: replace [first, last] where line `first` is a closing '}' of a preceding member
                 # and the replacement content starts with a new declaration without re-emitting '}'.
                 if "replace" in one and isinstance(one["replace"], (list, tuple)) and len(one["replace"]) == 2:
@@ -3115,6 +3160,56 @@ class Patcher:
                                     "from your content if you meant to add code inside the existing block."
                                 ),
                             }
+                    # #43(a): Refusal when insert_after: ins_pos splits an ordered/titled list item
+                    # from its immediately following indented sub-bullets (run1 t18->t19 v0.4.3).
+                    if ins_pos < len(sec_lines):
+                        frag = str(one.get("content") or "")
+                        first_non_blank = next((ln for ln in frag.splitlines() if ln.strip()), "")
+                        m_ins_item = re.match(r"^(\s*)(\d+[.)]|[-*+])\s+\S", first_non_blank)
+                        if m_ins_item:
+                            ins_indent = len(m_ins_item.group(1))
+                            next_idx = ins_pos
+                            while next_idx < len(sec_lines) and not sec_lines[next_idx].strip():
+                                next_idx += 1
+                            if next_idx < len(sec_lines):
+                                next_ln = sec_lines[next_idx]
+                                m_next_sub = re.match(r"^(\s+)([-*+]|\d+[.)])\s+\S", next_ln)
+                                if m_next_sub and len(m_next_sub.group(1)) > ins_indent:
+                                    # Find the last line of this sub-bullet block
+                                    last_sub_line = next_idx + 1
+                                    k = next_idx + 1
+                                    while k < len(sec_lines):
+                                        s_ln = sec_lines[k]
+                                        if not s_ln.strip():
+                                            k += 1
+                                            continue
+                                        cur_indent = len(s_ln) - len(s_ln.lstrip())
+                                        if cur_indent > ins_indent:
+                                            last_sub_line = k + 1
+                                            k += 1
+                                        else:
+                                            break
+                                    return {
+                                        "status": "error",
+                                        "block_id": block_id,
+                                        "error": (
+                                            "Refused: op " + str(op_idx) + " uses insert_after: " + str(ins_pos)
+                                            + " to insert a list item ('" + first_non_blank.strip()[:60]
+                                            + "'), but line " + str(next_idx + 1) + " ('"
+                                            + next_ln.strip()[:60] + "') is an indented sub-bullet belonging "
+                                            "to line " + str(ins_pos) + ". Inserting at line " + str(ins_pos)
+                                            + " splits that item from its sub-bullet(s). Nothing was written."
+                                        ),
+                                        "offending_op": op_idx,
+                                        "content_hash": current_hash,
+                                        "line_count": len(sec_lines),
+                                        "numbered_text": numbered(content, 1),
+                                        "actionable_hint": (
+                                            "Use insert_after: " + str(last_sub_line)
+                                            + " to insert your new item AFTER the sub-bullet(s) ending on line "
+                                            + str(last_sub_line) + "."
+                                        ),
+                                    }
                 if "replace" in one and isinstance(one["replace"], (list, tuple)) and len(one["replace"]) == 2:
                     dropped_check = self._heading_range_drops_a_bullet([one], content)
                     if dropped_check is not None:
@@ -4542,9 +4637,21 @@ class Patcher:
             if not Patcher._looks_like_a_title(before_lines[first - 1]):
                 continue
             content_lines = str(op.get("content") or "").splitlines()
-            if any(Patcher._looks_like_a_bullet(one) for one in content_lines):
+            non_blank_content = [one for one in content_lines if one.strip()]
+            has_any_bullet = any(Patcher._looks_like_a_bullet(one) for one in content_lines)
+            ends_on_unbulleted_title = bool(
+                non_blank_content
+                and Patcher._looks_like_a_title(non_blank_content[-1])
+                and len([one for one in non_blank_content if Patcher._looks_like_a_title(one)]) >= 2
+            )
+            if has_any_bullet and not ends_on_unbulleted_title:
                 continue
             content_text = {one.strip() for one in content_lines if one.strip()}
+            if ends_on_unbulleted_title:
+                last_line = before_lines[last - 1]
+                if Patcher._looks_like_a_bullet(last_line) and last_line.strip() not in content_text:
+                    return last, last_line.strip()
+                continue
             for number in range(first + 1, last + 1):
                 line = before_lines[number - 1]
                 if not Patcher._looks_like_a_bullet(line):
@@ -4684,6 +4791,45 @@ class Patcher:
         for num_str, l1, l2 in find_dups(after):
             if num_str not in before_dups:
                 return num_str, l1, l2
+
+        # #45: Also detect duplicate ordered-list item bodies / TOC links at the same indentation
+        # level even when their ordinal numbers differ (e.g. '10. [Best Practices](#best-practices)'
+        # followed by an unconsumed '9. [Best Practices](#best-practices)').
+        item_body_re = re.compile(r"^(\s*)\d+[.)]\s+(\S.*)$")
+
+        def find_body_dups(text: str) -> List[Tuple[str, int, int]]:
+            seen_by_indent: Dict[str, Dict[str, int]] = {}
+            dups: List[Tuple[str, int, int]] = []
+            in_fence = False
+            for idx, raw_ln in enumerate(text.splitlines(), 1):
+                stripped = raw_ln.strip()
+                if stripped.startswith(("```", "~~~")):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                if stripped.startswith("#"):
+                    seen_by_indent.clear()
+                    continue
+                m = item_body_re.match(raw_ln)
+                if m:
+                    indent, body = m.group(1), m.group(2).strip()
+                    if len(body) < 6:
+                        continue
+                    for k in list(seen_by_indent.keys()):
+                        if len(k) > len(indent):
+                            del seen_by_indent[k]
+                    bucket = seen_by_indent.setdefault(indent, {})
+                    if body in bucket:
+                        dups.append((body, bucket[body], idx))
+                    else:
+                        bucket[body] = idx
+            return dups
+
+        before_body_dups = {d[0] for d in find_body_dups(before)}
+        for body_str, l1, l2 in find_body_dups(after):
+            if body_str not in before_body_dups:
+                return body_str, l1, l2
         return None
 
     def _written_beyond_block(
@@ -4735,15 +4881,21 @@ class Patcher:
         if not created:
             return written
         created_sorted = sorted(created, key=lambda one: int(one.get("start_line") or 0))
-        written["created_symbols"] = [
-            {
-                "id": self.displayed_id(str(item["id"])) or str(item["id"]),
-                "kind": item.get("kind"),
-                "name": item.get("name"),
-                "line": int(item.get("start_line") or 0),
-            }
-            for item in created_sorted
-        ]
+        written["created_symbols"] = []
+        for item in created_sorted:
+            cid = str(item["id"])
+            disp_id = self.displayed_id(cid) or cid
+            c_metrics = self.block_metrics(cid)
+            written["created_symbols"].append(
+                {
+                    "id": disp_id,
+                    "kind": item.get("kind"),
+                    "name": item.get("name"),
+                    "line": int(item.get("start_line") or 0),
+                    "content_hash": c_metrics["content_hash"] if c_metrics else None,
+                    "line_count": c_metrics["line_count"] if c_metrics else None,
+                }
+            )
         identifier = str(created_sorted[0]["id"])
         metrics = self.block_metrics(identifier)
         if metrics is None:
@@ -5136,12 +5288,21 @@ class Patcher:
                 }
             if parent_sym:
                 if anchor_sym.parent_id != parent_sym.id:
-                    return {
-                        "status": "error",
-                        "parent_id": parent_id,
-                        "error": f"Anchor '{anchor}' is not a direct child of container '{parent_id}'.",
-                        "actionable_hint": "Specify an anchor symbol that belongs to this container, or omit anchor.",
-                    }
+                    # #44(c): In C#/Python/TS, top-level types inside a namespace often have
+                    # parent_id == None in the symbol table while parent_sym is the namespace
+                    # in the same file. Allow anchoring on a top-level symbol of the same file
+                    # when parent_sym.kind == "namespace".
+                    if not (
+                        parent_sym.kind == "namespace"
+                        and anchor_sym.file_path == parent_sym.file_path
+                        and anchor_sym.parent_id is None
+                    ):
+                        return {
+                            "status": "error",
+                            "parent_id": parent_id,
+                            "error": f"Anchor '{anchor}' is not a direct child of container '{parent_id}'.",
+                            "actionable_hint": "Specify an anchor symbol that belongs to this container, or omit anchor.",
+                        }
             else:
                 if anchor_sym.file_path != file_path or anchor_sym.parent_id is not None:
                     return {
@@ -5172,6 +5333,39 @@ class Patcher:
         at_start = position == "start"
 
         if parent_sym and parent_sym.kind == "class":
+            # #44(b): Prevent insert_block(parent=Class) from silently nesting a sibling enum/type
+            # inside the class when the caller submitted a top-level type declaration (run7 t09).
+            first_code_line = next(
+                (
+                    ln.strip()
+                    for ln in code.splitlines()
+                    if ln.strip() and not ln.strip().startswith(("//", "/*", "*", "#"))
+                ),
+                "",
+            )
+            m_nested_type = re.match(
+                r"^(?:(?:public|internal|private|protected|static|abstract|sealed|partial|readonly)\s+)*(enum)\s+(\w+)",
+                first_code_line,
+            )
+            if m_nested_type and anchor_sym is None:
+                decl_kind, decl_name = m_nested_type.group(1), m_nested_type.group(2)
+                disp_parent = self.displayed_symbol_id(parent_sym.id) or parent_id
+                return {
+                    "status": "error",
+                    "parent_id": parent_id,
+                    "error": (
+                        "Refused: insert_block(parent='" + disp_parent + "') with '" + decl_kind + " "
+                        + decl_name + "' would NEST the " + decl_kind + " inside class '" + disp_parent
+                        + "' instead of declaring it as a sibling type in '" + file_path + "'. "
+                        "The file is left untouched."
+                    ),
+                    "actionable_hint": (
+                        "To declare '" + decl_name + "' as a sibling type right after '" + disp_parent
+                        + "', call insert_block(parent='" + file_path + "', anchor='" + disp_parent
+                        + "', text=...) or use edit_block on '" + disp_parent
+                        + "' with insert_after on its last line."
+                    ),
+                }
             # Members sit one level below their container, computed from the AST
             # depth (not from the container's current first line, which may itself
             # be mis-indented). `dedent`, not `strip`: strip de-indents only the
@@ -7054,13 +7248,13 @@ class Patcher:
             return payload
         if candidate.is_file():
             payload["error"] = (
-                "'" + parent_id + "' is a FILE, not a block that can take a child: nothing was "
-                "created."
+                "'" + parent_id + "' is a FILE, not a Markdown document or directory that can take "
+                "a paragraph/file child here: nothing was created."
             )
             payload["actionable_hint"] = (
-                "A code file's children are symbols -- insert_block(parent='" + parent_id
-                + "', ...) creates one. insert_block creates the TREE (files and directories) and "
-                "document paragraphs."
+                "To add a symbol to a code file, call insert_block(parent='" + parent_id
+                + "::ClassName', text=...) for a class member, or edit_block with insert_after on "
+                "the last line of a top-level symbol in '" + parent_id + "'."
             )
             return payload
         holder = candidate.parent
@@ -7394,9 +7588,34 @@ class Patcher:
                         None,
                     )
             if child_index is None or child_index not in children:
-                return self._where_not_a_child(
-                    parent_id, where, document_id, layout, live_ids, child_index
-                )
+                # #47: When `parent` is the document path itself (`doc.md`) and the document has a
+                # single top-level H1 heading (`doc.md::H1`), an agent passing a level-2 section as
+                # `anchor` means to insert a sibling under that H1 root. Route automatically to the
+                # H1 parent instead of refusing.
+                if (
+                    parent_index is None
+                    and child_index is not None
+                    and len(children) == 1
+                ):
+                    holder_idx = self._holder_index(layout, child_index)
+                    if holder_idx == children[0]:
+                        parent_index = holder_idx
+                        parent_id = live_ids[holder_idx]
+                        parent_level = int(layout[parent_index]["level"])
+                        children_start = parent_index + 1
+                        children_end = len(layout)
+                        for j in range(parent_index + 1, len(layout)):
+                            if int(layout[j]["level"]) <= parent_level:
+                                children_end = j
+                                break
+                        level = parent_level + 1
+                        children = [
+                            j for j in range(children_start, children_end) if int(layout[j]["level"]) == level
+                        ]
+                if child_index is None or child_index not in children:
+                    return self._where_not_a_child(
+                        parent_id, where, document_id, layout, live_ids, child_index
+                    )
             # After the child AND its own descendants: landing right after its body
             # would make the new block swallow them, they are one level deeper.
             offset = self._subtree_end(layout, child_index, len(document_text))
