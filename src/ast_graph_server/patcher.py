@@ -2949,6 +2949,111 @@ class Patcher:
                 ),
             }
 
+        if kind == "symbol":
+            sym_lines = content.splitlines()
+            sym_kind = str(meta.get("symbol_kind") or "")
+            for op_idx, one in enumerate(ops or []):
+                if not isinstance(one, dict):
+                    continue
+                # #35: insert_after on the LAST line of a type container (class, struct, interface, record)
+                # with a member declaration would land AFTER the closing '}' of the container (orphan member).
+                ins_pos = one.get("insert_after")
+                if (
+                    isinstance(ins_pos, int)
+                    and ins_pos == len(sym_lines)
+                    and len(sym_lines) >= 2
+                    and sym_lines[-1].strip() == "}"
+                    and sym_kind in ("class", "struct", "interface", "record")
+                ):
+                    frag = str(one.get("content") or "")
+                    first_meaningful = next(
+                        (
+                            ln.strip()
+                            for ln in frag.splitlines()
+                            if ln.strip() and not ln.strip().startswith(("//", "/*", "*", "#"))
+                        ),
+                        "",
+                    )
+                    is_type_decl = bool(
+                        re.search(r"\b(class|struct|interface|enum|record|namespace|delegate)\s+\w+", first_meaningful)
+                    )
+                    is_member_decl = bool(
+                        first_meaningful.startswith("[")
+                        or re.match(
+                            r"^(public|private|internal|protected|static|virtual|override|abstract|async|readonly|const|void|bool|int|long|string|double|float|Task|IEnumerable|IReadOnlyList|Dictionary|List)\b",
+                            first_meaningful,
+                        )
+                    )
+                    if is_member_decl and not is_type_decl:
+                        return {
+                            "status": "error",
+                            "block_id": block_id,
+                            "error": (
+                                "Refused: op " + str(op_idx) + " uses insert_after: " + str(ins_pos)
+                                + " (the closing '}' line of " + sym_kind + " '" + str(block_id)
+                                + "') to insert a member declaration. Inserting after the closing brace "
+                                "places the member OUTSIDE the " + sym_kind + " in the enclosing file, "
+                                "producing an orphan member that will not compile. Nothing was written."
+                            ),
+                            "offending_op": op_idx,
+                            "content_hash": current_hash,
+                            "line_count": len(sym_lines),
+                            "numbered_text": numbered(content, 1),
+                            "actionable_hint": (
+                                "Use insert_after: " + str(ins_pos - 1) + " to insert the member INSIDE '"
+                                + str(block_id) + "' right before its closing '}' on line " + str(ins_pos)
+                                + ", or call insert_block(parent='" + str(block_id) + "', text=...)."
+                            ),
+                        }
+                # #36: replace [first, last] where line `first` is a closing '}' of a preceding member
+                # and the replacement content starts with a new declaration without re-emitting '}'.
+                if "replace" in one and isinstance(one["replace"], (list, tuple)) and len(one["replace"]) == 2:
+                    try:
+                        r_first, r_last = int(one["replace"][0]), int(one["replace"][1])
+                    except (TypeError, ValueError):
+                        r_first, r_last = 0, 0
+                    if (
+                        1 <= r_first <= len(sym_lines)
+                        and r_last < len(sym_lines)
+                        and sym_lines[r_first - 1].strip() == "}"
+                    ):
+                        frag = str(one.get("content") or "")
+                        first_meaningful = next(
+                            (
+                                ln.strip()
+                                for ln in frag.splitlines()
+                                if ln.strip() and not ln.strip().startswith(("//", "/*", "*"))
+                            ),
+                            "",
+                        )
+                        starts_new_decl = bool(
+                            first_meaningful.startswith("[")
+                            or re.match(
+                                r"^(public|private|internal|protected|static|virtual|override|abstract|async|def\s+|function\s+|export\s+)\b",
+                                first_meaningful,
+                            )
+                        )
+                        if starts_new_decl and not first_meaningful.startswith("}"):
+                            return {
+                                "status": "error",
+                                "block_id": block_id,
+                                "error": (
+                                    "NOTHING was written: op " + str(op_idx) + " (replace [" + str(r_first)
+                                    + ", " + str(r_last) + "]) replaces line " + str(r_first)
+                                    + ", which holds the closing '}' of the preceding member, with content "
+                                    "starting with '" + first_meaningful[:60] + "' without re-emitting that "
+                                    "closing '}'. That would leave the preceding member unclosed."
+                                ),
+                                "offending_op": op_idx,
+                                "content_hash": current_hash,
+                                "line_count": len(sym_lines),
+                                "numbered_text": numbered(content, 1),
+                                "actionable_hint": (
+                                    "Use insert_after: " + str(r_first) + " to insert your new member(s) "
+                                    "AFTER the closing '}' on line " + str(r_first) + ", or keep the leading "
+                                    "'}' on the first line of your replacement content."
+                                ),
+                            }
         if kind == "section":
             sec_lines = content.splitlines()
             for op_idx, one in enumerate(ops or []):
@@ -3060,6 +3165,30 @@ class Patcher:
                     + "') prints the addresses of the child blocks that hold the rest."
                 )
             return error
+        if kind in ("section", "document"):
+            dup_ord = self._markdown_duplicate_ordinal(content, applied.text)
+            if dup_ord is not None:
+                num_str, l1, l2 = dup_ord
+                return {
+                    "status": "error",
+                    "block_id": block_id,
+                    "error": (
+                        "NOTHING was written: your edit creates two consecutive items numbered '"
+                        + num_str + ".' at the same indentation level (at line " + str(l1)
+                        + " and line " + str(l2) + " of the resulting block). A partial replace or "
+                        "insert_after into an ordered list leaves the following item numbers unshifted."
+                    ),
+                    "duplicated_ordinal": num_str,
+                    "content_hash": current_hash,
+                    "line_count": len(content.splitlines()),
+                    "numbered_text": numbered(content, 1),
+                    "actionable_hint": (
+                        "Extend your replace range to renumber the following ordered list items in "
+                        "the same operation, or adjust the item number so the sequence stays strictly "
+                        "increasing (1., 2., 3., ...). The block is untouched and the numbered_text "
+                        "above is current."
+                    ),
+                }
         insert_duplicate: Optional[str] = None
         repeated = self._newly_repeated_line(content, applied.text, ops=ops)
         duplicated = repeated[0] if repeated else None
@@ -4305,16 +4434,16 @@ class Patcher:
 
     @staticmethod
     def _is_syntax_barrier(answer: Any) -> bool:
-        """True when an answer is the syntax barrier refusal, and not another cause.
-
-        Read from `validation.syntax_ok`, never from the message text: the cause is a FIELD, and
-        a check that greps its own prose is one wording change away from refusing the wrong
-        batch.
-        """
+        """True when an answer is the syntax barrier refusal (or a structural namespace refusal #39)."""
         if not isinstance(answer, dict) or answer.get("status") != "error":
             return False
         validation = answer.get("validation")
-        return isinstance(validation, dict) and validation.get("syntax_ok") is False
+        if isinstance(validation, dict):
+            if validation.get("syntax_ok") is False:
+                return True
+            if validation.get("errors") == ["namespace mutation refused"]:
+                return True
+        return False
     @staticmethod
     def _has_range_op(ops: Any) -> bool:
         """True when at least one op replaces or DELETES a range.
@@ -4500,8 +4629,61 @@ class Patcher:
                 sum(1 for k in range(first + 1, second + 1) if after_lines[k].strip())
                 for first, second in zip(places, places[1:])
             )
+            # #40: For an insert_after operation (no replace range), a statement repeated across two
+            # separate loop/control blocks (i.e. separated by a closing/opening brace or 'foreach'/'for'/'if')
+            # is a deliberate second loop body, not an accidental duplicate.
+            if not replaced_ranges:
+                has_block_boundary = all(
+                    any(
+                        after_lines[k].strip() in ("{", "}")
+                        or after_lines[k].strip().startswith(("foreach ", "for ", "if ", "else", "while "))
+                        for k in range(first + 1, second)
+                    )
+                    for first, second in zip(places, places[1:])
+                )
+                if has_block_boundary:
+                    continue
             if raw_gap <= 4 or non_blank_gap <= 2:
                 return line, was_at
+        return None
+
+    @staticmethod
+    def _markdown_duplicate_ordinal(before: str, after: str) -> Optional[Tuple[str, int, int]]:
+        """Detect if an edit introduced two consecutive ordered list items with the SAME ordinal
+        number (e.g. two '3. **...**') at the same indentation level that were not already duplicated (#37)."""
+        ord_re = re.compile(r"^(\s*)(\d+)\.\s+\S")
+
+        def find_dups(text: str) -> List[Tuple[str, int, int]]:
+            last_num_by_indent: Dict[str, Tuple[str, int]] = {}
+            dups: List[Tuple[str, int, int]] = []
+            in_fence = False
+            for idx, raw_ln in enumerate(text.splitlines(), 1):
+                stripped = raw_ln.strip()
+                if stripped.startswith(("```", "~~~")):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                if stripped.startswith("#"):
+                    last_num_by_indent.clear()
+                    continue
+                m = ord_re.match(raw_ln)
+                if m:
+                    indent, num_str = m.group(1), m.group(2)
+                    # Clear deeper indentations when a parent list item appears
+                    for k in list(last_num_by_indent.keys()):
+                        if len(k) > len(indent):
+                            del last_num_by_indent[k]
+                    prev = last_num_by_indent.get(indent)
+                    if prev is not None and prev[0] == num_str:
+                        dups.append((num_str, prev[1], idx))
+                    last_num_by_indent[indent] = (num_str, idx)
+            return dups
+
+        before_dups = {d[0] for d in find_dups(before)}
+        for num_str, l1, l2 in find_dups(after):
+            if num_str not in before_dups:
+                return num_str, l1, l2
         return None
 
     def _written_beyond_block(

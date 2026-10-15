@@ -52,7 +52,7 @@ from .externals import (
 #: output down to its error lines (``benchmarks/agent.py``).
 HINT_PREFIX = "help: "
 
-HINT_CODES = ("CS0246", "CS0426", "CS0234")
+HINT_CODES = ("CS0246", "CS0426", "CS0234", "CS0122")
 MAX_CANDIDATES = 3
 #: A candidate CONTAINED in the faulty name must be at least this long: 'Row' inside
 #: 'ArrowRowBatch' is a coincidence, not a suggestion.
@@ -65,7 +65,7 @@ _ERROR_LINE = re.compile(
     r"(?:\s*\[(?P<project>[^\]]+\.(?:cs|fs|vb)proj)\])?\s*$"
 )
 #: Quoted names: ASCII quotes, typographic quotes, and the French guillemets.
-_QUOTED = re.compile(r"['\u2018\u2019\u00ab\"]\s*([A-Za-z_@][\w.`<>@]*?)\s*['\u2018\u2019\u00bb\"]")
+_QUOTED = re.compile(r"['\u2018\u2019\u00ab\"]\s*([A-Za-z_@][\w.`<>@()]*?)\s*['\u2018\u2019\u00bb\"]")
 _SKIPPED_DIRS = {"bin", "obj", "node_modules", "packages"}
 
 
@@ -129,6 +129,7 @@ def parse_unknown_names(output: str) -> List[UnknownName]:
 
 def _strip_generic(name: str) -> str:
     name = name.strip().lstrip("@")
+    name = re.sub(r"\(.*\)$", "", name)
     name = re.sub(r"<.*>$", "", name)
     return re.sub(r"`\d+$", "", name)
 
@@ -528,13 +529,22 @@ def build_hints(output: str, workspace: Optional[Path] = None) -> List[str]:
     of the workspace.
     """
     unknowns = parse_unknown_names(output)
+    lines: List[str] = []
+    if any(u.code == "CS0122" for u in unknowns):
+        for u in unknowns:
+            if u.code == "CS0122":
+                lines.append(
+                    f"{HINT_PREFIX} '{u.written}' ({u.code}) -- test projects are separate assemblies "
+                    f"without InternalsVisibleTo: declare '{u.name}' as 'public' (not 'internal' or "
+                    f"'private') if a test project calls or inspects it directly."
+                )
+        unknowns = [u for u in unknowns if u.code != "CS0122"]
     if not unknowns:
-        return []
+        return lines
     workspace = Path(workspace) if workspace is not None else None
     local = workspace_index(workspace) if workspace is not None else NameIndex()
     fallback: Optional[List[Path]] = None
     per_project: Dict[str, NameIndex] = {}
-    lines: List[str] = []
     for unknown in unknowns:
         if unknown.project:
             candidate = Path(unknown.project)
