@@ -48,12 +48,6 @@ class ServerConfig:
             ".work*",
             ".benchmark-work*",
             "*.zip",
-            "reports",
-            "reports/*",
-            "transcripts",
-            "transcripts/*",
-            "benchmarks/results",
-            "benchmarks/results/*",
             # Secret material: never indexed, so it can never reach a Dossier.
             # Measured on the benchmark repository: DataLinq.Enterprise/.secrets.md
             # and snowflake/secret.md were indexed and listed in the project map,
@@ -70,6 +64,19 @@ class ServerConfig:
             "credentials*.yml",
             "credentials*.yaml",
             "credentials*.json",
+        ]
+    )
+    #: Directories excluded from automatic workspace indexing, project maps, and global
+    #: searches (build_context, get_project_map, search_documents), while remaining
+    #: directly accessible to explicit read_block / edit_block / delete_block calls.
+    discovery_exclude_patterns: List[str] = field(
+        default_factory=lambda: [
+            "reports",
+            "reports/*",
+            "transcripts",
+            "transcripts/*",
+            "benchmarks/results",
+            "benchmarks/results/*",
         ]
     )
 

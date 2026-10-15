@@ -1,7 +1,7 @@
-# Backlog Technique & Feuille de Route : Moteur Scalpel (`scalpel-mcp`)
+# Backlog Technique & Feuille de Route Unifiée : Scalpel (`scalpel-mcp` & `scalpel-benchmarks`)
 
-Dernière mise à jour : 13/10/2026  
-Statut : Document de référence unifié — Orientations stratégiques, chantiers moteur et roadmap produit.
+Dernière mise à jour : 15/10/2026  
+Statut : Document de référence unique consolidé (dédupliqué à partir des 43 bilans de sessions DSH `reports/bilans_scalpel/`, des 25 éplucheurs `v0.4.1` et des backlogs historiques `scalpel-mcp` / `scalpel-benchmarks`).
 
 > **Principe directeur de Scalpel** : Remplacer les diffs textuels aveugles et les réécritures complètes de fichiers par des manipulations AST déterministes, protégées par un verrouillage optimiste de hachage de blocs (CAS) et un historique delta atomique. L'objectif est l'efficacité maximale pour les agents IA (un seul appel réussi par intention, zéro régression, zéro friction).
 
@@ -38,9 +38,9 @@ Les campagnes de benchmark (`campaign_v3`) et les stress-tests du 13/10/2026 sur
 * **Symptôme & Mesure** : Pour calculer les métriques de bloc (`content_hash`, `line_count`, `numbered_text`) des sections inlinées, `server.py` appelle `self.patcher.block_metrics(displayed)`. Le Patcher relisait le fichier physique sur disque et réexécutait l'intégralité du découpage syntaxique Markdown (`markdown_layout`). Si 20 sections provenaient du même document (ex. `LINQ-to-Spark.md`), le document était relu et re-parsé 20 fois de suite dans le même tour d'agent.
 * **Solution technique & Validée** : Mise en cache LRU courte par `(file_path, content_hash)` de la structure Markdown dans le Patcher (`_get_markdown_layout`). Suppression des I/O disque et re-parsings redondants lors des résolutions multiples.
 
-### D. Interdiction absolue du cache de build figé après un échec (`build_fingerprint` toxique) — S1 / Critique
-* **Symptôme & Mesure (Run 1 de `campaign_v3`)** : Lorsqu'un build a échoué (14 erreurs C#), l'agent a corrigé son code mais le harnais a répondu `build FAILED (no compilation) -- answered from the previous build`. L'agent a brûlé 14 tours à contourner ce faux cache en insérant des lignes blanches dans les directives `using` pour modifier artificiellement le fingerprint du build.
-* **Règle impérative** : Si le build précédent a échoué (`success == False` ou `errors > 0`), **toute nouvelle demande de build doit impérativement forcer la recompilation réelle**.
+### D. Clarification et sécurisation du cache de build après échec (`build_fingerprint`) — S2 / Harnais Benchmark
+* **Symptôme & Mesure (Run 1 de `campaign_v3`)** : Lorsqu'un build a échoué (14 erreurs C# sur un membre `internal` invisible depuis le projet de test) et que l'agent n'a modifié aucun fichier de code avant de relancer `build()`, le harnais a répondu `build FAILED (no compilation) -- answered from the previous build`. L'agent a cru à un bug de cache et a brûlé 14 tours.
+* **Action restante (`scalpel-benchmarks/benchmarks/toolsets.py`)** : Ne jamais servir un échec en cache sans préciser explicitement dès la 1re ligne : `[NO CODE CHANGED SINCE LAST FAILED BUILD] Exact same C# source files on disk; fix the compilation errors below before calling build() again`, ou forcer la recompilation réelle après un échec.
 
 ---
 
@@ -62,21 +62,20 @@ Chantiers issus du rapport des trous d'accès et des audits de performance du mo
 
 ## 4. Chantiers Plugin DSH & Surface Unifiée (`packages/dsh-tool-scalpel`)
 
-Orientations d'architecture actées le 10-11/10/2026 pour le pont Node.js / DSH :
+État vérifié dans le code le 15/10/2026 :
 
-1. **Priorité 1 = Lot P (Parité Plugin DSH = Serveur MCP)** :
-   * *Constat mesuré* : `runner.py` appelait le patcheur et la base en direct sans passer par l'API unifiée MCP. En conséquence, le plugin DSH perdait le support du batch `edits=[...]`, la réponse compacte d'`edit_block`, le paramètre `view` de `search_symbols`, `full_top` de `search_documents`, et les descriptions enrichies du serveur.
-   * *Objectif* : Aligner strictement le plugin DSH sur la surface canonique du serveur MCP afin d'éviter toute dérive d'interface entre l'environnement de benchmark et l'environnement de production.
-
-2. **Gouvernance des Droits et Bac à Sable DSH (Lot F / D2)** :
-   * *Règle tranchée* : Alignement sur le jeu plat, même permissivité, ni plus ni moins. Les outils AST doivent respecter les politiques de bac à sable (`sandboxPolicy`, racines inscriptibles, escalade par `approval` en `allowed-once`, politique d'observation).
-   * Les mutations AST (`edit_block`, `insert_block`, `delete_block`) doivent vérifier les permissions de fichier avant toute écriture physique sur disque.
-
-3. **Granularité Fine pour JavaScript et TypeScript** :
-   * Élargir le découpage Tree-sitter au-delà des classes et fonctions de premier niveau pour adresser les fonctions imbriquées, les méthodes d'objets littéraux complexes et les exports déstructurés en tant que symboles distincts avec hash autonome.
-4. **Démonisation & Persistance du Pont Python DSH (`runner.py --daemon` & `bridge.js` - Lot 4 validé le 13/10/2026)** :
-   * *Constat mesuré* : Chaque appel à `callScalpelTool` ou `executeScalpel` créait un sous-processus Python éphémère (~150-300 ms de cold-start, réimportation complète de `tree_sitter`/`pydantic`/`mcp`/`sqlite3` et perte des caches en mémoire).
-   * *Solution déployée* : Mode démon persistant NDJSON (`runner.py --daemon`) maintenant un dictionnaire d'instances `(cfg, server, mtime_cache)` par workspace et une boucle `asyncio` dédiée, couplé à un cache `(st_mtime_ns, st_size)` (incluant l'inspection des chemins de `edits=[...]` et la purge `remove_file` des fichiers supprimés hors Scalpel). Côté Node.js (`bridge.js`), gestion dynamique `ref()`/`unref()` et attachement/détachement des listeners `data` + `pause()`/`resume()` sur `stdout`/`stderr` lorsque `pendingRequests.size === 0`, ramenant la latence chaude à **< 10 ms par appel** tout en garantissant une sortie immédiate de l'event loop (`node --test`).
+1. **Lot P (Parité Plugin DSH = Serveur MCP) — Fait (13/10/2026)** :
+   * `runner.py` dispatche désormais toutes les commandes via `server.mcp.call_tool(cmd, args)`, assurant 100 % de parité (`edits=[...]`, `inserts=[...]`, `view`, `full_top`, format texte compact).
+2. **Gouvernance des Droits et Bac à Sable DSH (Lot F / D2) — Fait (13/10/2026)** :
+   * Implémenté dans `packages/dsh-tool-scalpel/lib/sandbox.js` et branché dans `lib/index.js` (`checkMutationAllowed` vérifie la politique de sandbox avant toute mutation AST ou fichier).
+3. **Granularité Fine pour JavaScript et TypeScript — Fait (niveau fonctions/méthodes/variables) & Résidu S2 ouvert** :
+   * Découpage Tree-sitter actif (`test/typescript_granularity.test.mjs`).
+   * **Résidu S2 (issu du bilan DSH `session-2a61` du 14/10)** : (a) `read_block` sur une fonction JS/TS exportée (`export function foo()`) omet le mot-clé `export` à la ligne 1 du `numbered_text`, ce qui provoque une erreur de syntaxe `export export function` lorsque l'agent remplace la ligne 1 en incluant `export` ; (b) absence de bloc adressable `::imports` pour les `import ...` de tête de fichier en JS/TS (contrairement à Python `::imports` et C# `::using`).
+4. **Démonisation & Persistance du Pont Python DSH (`runner.py --daemon` & `bridge.js`) — Fait (13/10/2026)** :
+   * Mode démon persistant NDJSON maintenant un dictionnaire `(cfg, server, mtime_cache)` par workspace avec latence chaude **< 10 ms par appel**.
+5. **Cohérence `ignore_patterns` vs `read_block` / `edit_block` direct — S1/S2 (Nouveau, 15/10/2026)** :
+   * *Constat mesuré* : Le Lot 3 de `build_context` a ajouté `"reports"`, `"reports/*"`, `"transcripts"`, `"benchmarks/results"` dans `ServerConfig.ignore_patterns`. Or `_directory_listing`, `_file_text_block` et `_unindexed_path_refusal` consultent `indexer.ignore_pattern_for()` ! Conséquence : `read_block("reports/bilans_scalpel")` renvoie `0 entries` (alors qu'il contient 87 fichiers) et `read_block("reports/bilans_scalpel/foo.md")` est refusé au premier appel, puis **accepté au second appel** parce que `runner.py` n'a indexé le fichier qu'après coup.
+   * *Correctif requis* : Séparer `discovery_exclude_patterns` (exclus de `build_context`, `get_project_map`, `search_documents` et de l'indexation initiale automatique) des patterns de sécurité/binaire, afin qu'un appel explicite `read_block(path)` ou `edit_block(path)` sur un fichier de `reports/` ou `benchmarks/results/` fonctionne dès le 1er tour et que le listing de dossier affiche ses entrées.
 
 ## 5. Feuille de Route Produit & Profondeur Sémantique (Roadmap long terme)
 
@@ -93,40 +92,46 @@ Axes d'évolution majeurs issus de la roadmap d'ingénierie (`ROADMAP_AND_OPTIMI
    * Utiliser les empreintes `git diff-tree` pour n'indexer que les blobs modifiés lors de commits successifs.
    * Partager et persister la base SQLite AST (`.agent_graph.db`) de façon sûre entre sessions multiples sans collision d'écriture WAL.
 
-## 6. Registre Consolidé des Anomalies d'Ergonomie et de Friction
+## 6. Registre Consolidé des Anomalies d'Ergonomie et de Friction (Campagnes & Sessions DSH)
 
-Suivi qualité systématique des anomalies signalées par les agents lors des campagnes :
+Suivi qualité unifié et dédupliqué (campagnes `v0.3.0` → `v0.4.1` + 43 bilans de sessions DSH du 13 au 15/10/2026) :
 
 | # | Anomalie / Friction | Classe | Statut | Synthèse & Action |
 |---|---|:---:|:---:|---|
 | **1** | Plafonnement silencieux de `search_symbols(view='implementation')` | S2 | **CORRIGÉ** | Le plafond est désormais le `limit` explicite de l'appelant. |
-| **2** | `read_block` sur `.md` sans préambule rend le hash du vide (`e3b0...`) | S3 | **OUVERT** | Rendre le hash du fichier entier au lieu du hash vide non discriminant. |
+| **2** | `read_block` sur `.md` sans préambule rend le hash du vide (`e3b0...`) | S3 | **CORRIGÉ (15/10)** | Expose désormais `file_content_hash` (hash du fichier entier) en sus du statut `root_text_empty: True`. |
 | **3** | `list_documents` avec message d'absence auto-contradictoire | S3 | **CORRIGÉ** | Absorbé dans `search_documents`, messages reformulés. |
 | **4** | `edit_block` dupliquant les lignes frontières sur plages inclusives | S2 | **CORRIGÉ** | Refus préventif immédiat avec mention des lignes dupliquées (`INCLUSIVE`). |
 | **5** | `insert_block` renumérotant les sections frères et surprenant l'agent | S3 | **SURVEILLANCE** | Comportement documenté dans l'outil, suivi en campagne. |
 | **6** | Paramètre obsolète `where="start"` tenté par les agents | S2 | **CORRIGÉ** | Schémas unifiés, le parent s'utilise comme sa propre ancre. |
-| **7** | Écarts de formulation entre descriptions Agent et Serveur | S2 | **SOUS CONTRÔLE** | Couvert par `test_contract_parity.py` ; convergence vers source unique. |
-| **8** | Numéros de ligne cités dans les refus exprimés sur le résultat | S3 | **OUVERT** | Préférer citer les lignes du texte actuel pour les refus. |
+| **7** | Écarts de formulation entre descriptions Agent et Serveur | S2 | **SOUS CONTRÔLE** | Couvert par `test_contract_parity.py` ; scripts d'export automatique dans `packages/dsh-tool-scalpel/scripts/`. |
+| **8** | Numéros de ligne cités dans les refus exprimés sur le résultat | S3 | **CORRIGÉ (15/10)** | Clarifie explicitement `(in the block you read)` et `(of the resulting block)` avec numéro exact dans `actionable_hint`. |
 | **9** | Lot `edits` refusé sans désigner l'index de l'entrée fautive | S3 | **CORRIGÉ** | Le refus nomme précisément l'index et reporte les clés reçues. |
 | **10** | Replay redondant de builds identiques de fin de run | S2 | **CORRIGÉ** | Éprouvé via `code_fingerprint` ignorant les fichiers de documentation. |
 | **11** | Stale-read accusant un changement imaginaire au lieu du propriétaire | S1 | **CORRIGÉ** | Recherche globale par hash qui nomme le bloc propriétaire réel. |
-| **12** | Coût cumulé des refus d'outils (9,4 % des tours perdus) | S1 | **EN RÉDUCTION** | Diminution des rejets syntaxiques et fiabilisation des indices d'action. |
-| **13** | Limitations structurelles ayant poussé à l'usage du shell | S1 | **INTÉGRÉ** | Fichiers sans grammaire traités comme blocs uniques dans Scalpel. |
-| **14** | Faux "no compilation" sur build après échec (`build_fingerprint`) | S1 | **CRITIQUE (À FAIRE)** | Tout build suivant un échec doit forcer la recompilation réelle. |
-| **15** | Crash `FieldInfo` et conseil circulaire sur `search_documents` | S1 | **CORRIGÉ** | Déballage défensif, parité schéma, 625/625 tests passés (13/10/2026). |
-| **16** | Fausse alerte de limite de taille sur `edit_block` (coupure LLM) | S2 | **LOCALISÉ (HARNESS)** | Provient du runner de benchmark (`agent.py`) lors de coupure token du LLM ; ne relève pas du serveur Scalpel MCP. |
-| **17** | `insert_after: 0` en Markdown insérant du texte hors-titre avant le `# Heading` (doublon `(2)`) | S2 | **CORRIGÉ** | Garde préventif dans `_edit_block_locked` : refuse avec `actionable_hint` vers `insert_after: 1` (14/10/2026). |
-| **18** | `read_block` d'une section Markdown parente n'exposant pas l'existence de sous-sections enfants | S2 | **CORRIGÉ** | `child_sections` exposé en JSON et ligne `children: N sub-section(s) under this heading (...)` ajoutée en texte (14/10/2026). |
-| **19** | Faux positif du warning `_blank_boundary_lost` sur les sections Markdown | S3 | **CORRIGÉ** | Désactivé sur `section`/`document` où `update_document_section` garantit déjà le séparateur de section (14/10/2026). |
-| **20** | Message `operation itself is unreadable` sur une plage simplement hors bornes en batch | S3 | **CORRIGÉ** | Distinction explicite `out_of_bounds: True` avec invitation à utiliser les numéros du `numbered_text` frais (14/10/2026). |
-| **21** | Insertion `edit_block` silencieusement placée à l'intérieur d'un code fence Markdown ouvert (`run4` v0.4.1) | S2 | **OUVERT** | Dans `patcher.py::_edit_block_locked`, détecter si le point `insert_after: n` tombe dans un fence ` ``` ` ouvert de la section et émettre un warning/refus si le contenu inséré ouvre lui-même un fence. |
-| **22** | Référentiel de numérotation ambigu entre l'en-tête `search_symbols` (`L53-105` fichier) et `edit_block` (`1..53` bloc) (`run8` v0.4.1) | S2 | **OUVERT** | Dans `rendering.py` / `server.py`, afficher `file L53-105 (block lines 1..53)` dans l'en-tête `view='implementation'` pour éviter qu'un agent passe un numéro de ligne fichier à `edit_block`. |
-| **23** | Duplication non détectée quand un `replace` ré-émet une ligne séparée par des lignes blanches (`run9` v0.4.1) | S2 | **OUVERT** | Dans `patcher.py::_adjacent_duplicate`, étendre la comparaison `replace [a,b]` à la première ligne non blanche précédant `a` et suivant `b` (et non uniquement `a-1` / `b+1` stricts). |
-| **24** | Message contradictoire `top-level path` + `edits[]` multi-entrées et bruit `carried no path` sur hash unique (`run4`, `run6`, `run10`, `run18`, `run21`, `run25` v0.4.1) | S2/S3 | **OUVERT** | Dans `patcher.py::_edit_batch`, utiliser `top_level_path` comme fallback par défaut si une entrée de `edits[]` omet `path` (parité avec `insert_block`), et supprimer le warning `carried no path` lorsque `expected_hash` identifie un bloc unique. |
-| **25** | Cause racine d'accolade fermante surnuméraire noyée dans `note` et hint `use a text tool` sur namespace file-scoped (`run5` v0.4.1) | S2/S3 | **OUVERT** | Promouvoir le diagnostic de délimiteur dupliqué (`note`) dans `actionable_hint`, et remplacer `use a text tool` par une consigne `edit_block(insert_after=last_line)` lorsque le fichier utilise un `namespace X;` file-scoped. |
-| **26** | Plage `replace [a,b]` avalant un sous-item (`_sub_item_lost`) signalée en warning après écriture au lieu d'être refusée (`run14`, `run21` v0.4.1) | S2 | **OUVERT** | Dans `patcher.py::_edit_block_locked`, convertir la détection `_sub_item_lost` en refus préventif (comme `_adjacent_duplicate`) afin d'éviter un tour de réparation destructive. |
-| **27** | Préfixe `[ok] applied` ambigu lors d'une création de sibling hors du bloc hôte (`written_outside_block` / `host_block_unchanged`) (`run12`, `run25` v0.4.1) | S2/S3 | **OUVERT** | Dans `server.py::_text_edit_block`, afficher `[ok] created sibling after <block> (host block unchanged)` au lieu d'un en-tête `[ok] <host_block> (N lines)` suivi d'un warning contradictoire. |
-| **28** | Faux positif `S1` dans `peeler.py` sur le refus légitime `Wrong block: that hash is the content_hash of ...` (`run20` v0.4.1) | S3 | **OUVERT** | Dans `scalpel-benchmarks/benchmarks/peeler.py`, reclasser `Wrong block: that hash is the content_hash of` en `S2` (erreur d'adressage de l'agent avec remède immédiat fourni par l'outil, 0 mensonge d'outil). |
+| **12** | Coût cumulé des refus d'outils | S1 | **CORRIGÉ** | Tombé à 0 refus dans 72 % des runs (18/25) en `v0.4.1`. |
+| **13** | Fichiers sans grammaire (`.ps1`, `.txt`, `.gitignore`) refusés par `edit_block` | S1 | **CORRIGÉ (v0.4.1)** | Traités comme blocs `file_text` éditables en unitaire et en batch (`_file_text_block`). |
+| **14** | Message ambigu de cache `build` après un build en échec (`build_fingerprint`) | S2 | **CORRIGÉ (15/10)** | Affiche `[NO CODE CHANGED SINCE LAST FAILED BUILD]` et invite à vérifier la visibilité (`internal`/`public`). |
+| **15** | Crash `FieldInfo` et conseil circulaire sur `search_documents` | S1 | **CORRIGÉ** | Déballage défensif, parité schéma, tests de robustesse (13/10/2026). |
+| **16** | Message `SPLIT it` sur JSON tronqué à une seule entrée (`len(edits) <= 1`) | S2 | **CORRIGÉ (15/10)** | Dans `benchmarks/agent.py`, précise `SPLIT it into smaller line operations (for a single-block edit, there is no edits[] list to split)`. |
+| **17** | `insert_after: 0` en Markdown insérant du texte hors-titre avant le `# Heading` | S2 | **CORRIGÉ (v0.4.1)** | Garde préventif dans `_edit_block_locked` : 9/9 cas corrigés en 1 tour lors de la campagne `v0.4.1`. |
+| **18** | `read_block` d'une section Markdown parente cachant ses sous-sections enfants | S2 | **CORRIGÉ (v0.4.1)** | `child_sections` exposé en JSON et ligne `children: N sub-section(s)` ajoutée en texte. |
+| **19** | Faux positif du warning `_blank_boundary_lost` sur les sections Markdown | S3 | **CORRIGÉ (v0.4.1)** | Désactivé sur `section`/`document` où `update_document_section` garantit le séparateur. |
+| **20** | Message `operation itself is unreadable` sur une plage hors bornes en batch | S3 | **CORRIGÉ (v0.4.1)** | Distinction explicite `out_of_bounds: True` avec invitation à utiliser le `numbered_text` frais. |
+| **21** | Insertion `edit_block` silencieusement placée dans un code fence Markdown ouvert (`run4` v0.4.1) | S2 | **CORRIGÉ (15/10)** | Refus préventif dans `patcher.py::_edit_block_locked` avec indication de la ligne exacte du ` ``` ` fermant. |
+| **22** | Référentiel de numérotation ambigu entre `search_symbols` (`L53-105` fichier) et `edit_block` (`1..53` bloc) (`run8` v0.4.1 & audits DSH) | S2 | **CORRIGÉ (15/10)** | Affiche `L53-105 (block lines 1..53)` dans `search_symbols(view='implementation')` et `[file L53-105]` dans l'en-tête `read_block`. |
+| **23** | Duplication non détectée quand `replace` ré-émet une ligne séparée par des lignes blanches, ou faux positif intra-remplacement (`run9` v0.4.1 & `2459c797`) | S2 | **CORRIGÉ (15/10)** | Dans `_newly_repeated_line`, mesure `non_blank_gap <= 2` au-delà des lignes blanches et ignore les lignes dont l'original `was_at` faisait partie de la plage remplacée (`try`/`catch`). |
+| **24** | Warning verbeux `carried no path` sur hash unique (`7 runs / 25` v0.4.1) | S2/S3 | **CORRIGÉ (15/10)** | Message allégé et aligné dans `server.py::edit_block`. |
+| **25** | Cause d'accolade fermante surnuméraire noyée dans `note` et hint `use a text tool` sur namespace file-scoped (`run5` v0.4.1) | S2/S3 | **CORRIGÉ (15/10)** | `note` promu dans `actionable_hint` au top-level de `_syntax_error_payload`, et `use a text tool` remplacé par `use edit_block with insert_after on the last line` dans `_reject_duplicate`. |
+| **26** | Plage `replace [a,b]` avalant un sous-item (`_heading_range_drops_a_bullet`) signalée en warning après écriture au lieu d'être refusée (`run14`, `run21` v0.4.1) | S2 | **CORRIGÉ (15/10)** | Converti en refus préventif sans écriture (`dropped_bullet_line`) dans `_edit_block_locked`. |
+| **27** | Préfixe `[ok]` ambigu lors d'une création de sibling hors du bloc hôte (`written_outside_block` / `host_block_unchanged`) (`run12`, `run25` v0.4.1) | S2/S3 | **CORRIGÉ (15/10)** | Affiche `[ok] created sibling after <host_path> -> <new_id> (host block unchanged [h:...])` dans `lineops.py::format_single_edit_result`. |
+| **28** | Faux positif `S1` dans `peeler.py` sur le refus légitime `Wrong block: that hash is the content_hash of ...` (`run20` v0.4.1) | S3 | **CORRIGÉ (15/10)** | Reclassé de `S1` vers `S2` dans `scalpel-benchmarks/benchmarks/peeler.py`. |
+| **29** | Rebasage des chemins d'enfants Markdown dans un batch `edits=[...]` après renommage d'un titre parent (`session-4cc6` 15/10 & session courante) | S2 | **CORRIGÉ (15/10)** | Rebasage automatique des préfixes `parent::child` via `_batch_path_map` et héritage de `start_bytes` dans `_edit_batch`. |
+| **30** | Perte du mot-clé `export` en ligne 1 de `read_block` JS/TS et absence de bloc `::imports` (`session-2a61` 14/10) | S2 | **CORRIGÉ (15/10)** | Span `export_statement` inclus sur les déclarations exportées uniques et bloc `::imports` extrait dans `typescript_parser.py`. |
+| **31** | Instructions C# top-level (`Program.cs` sans classe) et fichiers MSBuild (`.csproj`/`.props`) non éditables en texte brut (`session-944f`, `session-2138` 14/10) | S2 | **CORRIGÉ (15/10)** | Extraction de `::top_level_statements` dans `csharp_parser.py`, lecture `::xml` et édition directe `edit_block` sur `.csproj`/`.props`/`.xml`. |
+| **32** | Refus `hors_racine` lors de l'intervention sur un dépôt frère (`DataLinq.Enterprise`, `scalpel-experts`) (`6 bilans DSH` 13-15/10) | S2 | **EN RÉSERVE (Priorité 4.1)** | Évolution multi-root workspace différée sur décision produit. |
+| **33** | Fichiers dans `reports/` ou `benchmarks/results/` masqués au listing et incohérents en lecture directe (`ignore_patterns`) (15/10) | S1/S2 | **CORRIGÉ (15/10)** | Dissociation de `discovery_exclude_patterns` (exclus de l'indexation auto et des recherches) et `ignore_patterns` dans `config.py` et `indexer.py`. |
+| **34** | Fichiers texte/diff encodés en UTF-16LE (BOM `FF FE` produits par PowerShell) refusés comme non-UTF-8 (`5593592d`, `0ff61ffe`) | S3 | **CORRIGÉ (15/10)** | Décodage automatique des BOM UTF-16LE/BE et UTF-8 dans `_decode_text_bytes`. |
 
 ## 7. Historique des Correctifs Récents Validés (13/10/2026)
 
@@ -210,13 +215,12 @@ Ce chantier répond au constat empirique mesuré sur les sessions DSH et consoli
 - Les agents adoptent la lecture groupée (`paths=[...]`) dès lors qu'elle est explicitement ordonnée dans le prompt (atteignant **61,2 %** de lectures groupées sur le benchmark contre < 5 % dans les sessions interactives DSH non outillées).
 - En revanche, l'écriture groupée (`edit_block(edits=[...])`) reste plafonnée à **21,9 %** et subit un taux de rejet élevé en raison de verrous syntaxiques stricts dans le moteur de patch.
 
-### A. Incitation et fluidification de la lecture groupée (`paths=[...]`) — S2 / Fort Impact
-* **Faits établis (Campagne 13/10/2026)** :
-  * 60 lectures groupées vs 38 unitaires observées quand le prompt système porte la directive directe *« Pass ALL the identifiers you need to read_block(paths=[...]) in ONE call »*.
-  * Dans DSH, l'absence de cette directive conduit les agents à un parcours séquentiel coûteux (1 tour par symbole).
-* **Actions Moteur & Contrat** :
-  1. **Contrat DSH** : Aligner le prompt de session DSH sur celui du benchmark pour ordonner le regroupement dès l'identification d'une liste de symboles ou de sections.
-  2. **Indice d'action dans les retours de listing** : Dans `read_block`, lorsqu'un listing de membres de code ou de plan Markdown est renvoyé, enrichir la réponse avec un rappel actionnable : `Call read_block(paths=['<file>::sym1', '<file>::sym2']) to read multiple members in one turn`.
+### A. Incitation et fluidification de la lecture groupée (`paths=[...]`) — Fait (13/10/2026)
+* **Faits établis (Campagne 13/10/2026 & v0.4.1)** :
+  * Adoption massive de `read_block(paths=[...])` tant en benchmark que dans les 43 sessions DSH (où des lots de 10 à 80 blocs sont lus en un seul tour).
+* **Actions réalisées** :
+  1. **Contrat DSH** : Prompt de session DSH aligné (`read_block(paths=[...]) reads several blocks in ONE call`).
+  2. **Indice d'action dans les retours de listing** : Implémenté dans `patcher.py::_file_outline` (`Call read_block(paths=['<file>::sym1', ...]) to read multiple blocks in one turn`) et `_read_block_locked`.
 
 ### B. Simplification et fiabilisation de l'écriture multi-blocs (`edit_block`) — Fait (13/10/2026)
 * **Faits établis & Découverte de l'Éplucheur Automatique (Runs r1, r2, r8)** :

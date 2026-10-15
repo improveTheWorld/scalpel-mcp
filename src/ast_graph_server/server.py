@@ -761,9 +761,15 @@ class ASTGraphServer:
                 # every line break and quote of the code arrives escaped. The header keeps
                 # what the caller needs to edit (address, hash, line count); the numbered
                 # lines follow verbatim, and the hint (if any) closes the answer.
+                file_lines = unified.get("lines")
+                fl_str = (
+                    f" [file L{file_lines[0]}-{file_lines[1]}]"
+                    if isinstance(file_lines, list) and len(file_lines) == 2
+                    else ""
+                )
                 header = (
                     f"{unified.get('id', one)} [{unified.get('kind', 'block')}] "
-                    f"[h:{unified.get('content_hash')}] ({unified.get('line_count')} lines)"
+                    f"[h:{unified.get('content_hash')}] ({unified.get('line_count')} lines){fl_str}"
                 )
                 parts = [header, unified["numbered_text"]]
                 if unified.get("child_sections"):
@@ -932,9 +938,11 @@ class ASTGraphServer:
                     ):
                         owner = self.patcher._unique_owner_of_hash(entry.get("expected_hash"))
                         if owner:
-                            entry = dict(entry)
-                            entry["path"] = owner
+                            updated_entry = dict(entry)
+                            updated_entry["path"] = owner
                             inferred[index] = owner
+                            filled.append(updated_entry)
+                            continue
                     filled.append(entry)
                 edits = filled
             if edits:

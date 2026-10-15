@@ -618,12 +618,11 @@ def test_a_stale_hash_on_a_file_id_with_its_own_text_keeps_the_generic_refusal(t
 
 
 def test_a_replace_that_swallows_the_bullet_under_a_title_is_named(tmp_path: Path) -> None:
-    """`replace [5,6]` on a titled item drops the bullet at line 6 -- the reply used to be silent.
+    """`replace [5,6]` on a titled item drops the bullet at line 6 -- refused preventively (#26).
 
-    Measured twice in the campaign of the 02/10/2026: `p1_r16` t41 (`replace [7,8]` re-emitting the
-    renumbered title, `warnings: []`) and `p1_r17` t27 -- the agent saw the sub-bullets were gone
-    and paid a repair call. The fact is NAMED, not refused: dropping a bullet on purpose is a
-    legitimate edit, and a refusal would cost the same turn as the repair it names.
+    Measured in `p1_r16` t41, `p1_r17` t27, and `v0.4.1` `run14` t17 / `run21` t16: when a replace
+    range covers a titled item AND its sub-bullet while the replacement content carries no bullet,
+    preventing the write saves the repair turn and leaves the file intact.
     """
     ws = tmp_path / "ws"
     (ws / "docs").mkdir(parents=True)
@@ -644,10 +643,11 @@ def test_a_replace_that_swallows_the_bullet_under_a_title_is_named(tmp_path: Pat
         ops=[{"replace": [5, 6], "content": "2. **Beta:**"}],
         expected_hash=block["content_hash"],
     )
-    assert result["status"] == "success", result
-    assert any("bullet" in w.lower() and "line 6" in w for w in result.get("warnings") or []), result
-    # The bullet IS gone: the warning describes the file, it does not forbid the edit.
-    assert "bullet B" not in (ws / "docs" / "spec.md").read_text(encoding="utf-8")
+    assert result["status"] == "error", result
+    assert "bullet" in result["error"].lower() and "line 6" in result["error"], result
+    assert result.get("dropped_bullet_line") == 6
+    # The bullet is preserved because the destructive replace was refused before writing.
+    assert "bullet B" in (ws / "docs" / "spec.md").read_text(encoding="utf-8")
 
 
 def test_keeping_or_replacing_the_bullet_is_silent() -> None:

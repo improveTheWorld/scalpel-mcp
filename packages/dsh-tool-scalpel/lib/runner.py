@@ -90,7 +90,7 @@ def dispatch_command(server, cfg, tool_schemas, cmd: str, args: dict, mtime_cach
                 abs_key = str(abs_p)
                 rel_p = cfg.to_relative_posix(abs_p)
                 mutated_abs_paths.append(abs_p)
-                if abs_p.is_file() and not server.indexer.should_ignore(abs_p):
+                if abs_p.is_file() and server.indexer.ignore_pattern_for(rel_p) is None:
                     if server.indexer._is_supported(rel_p):
                         st = abs_p.stat()
                         sig = (st.st_mtime_ns, st.st_size)

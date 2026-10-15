@@ -113,6 +113,26 @@ class CSharpParser(BaseParser):
                     content_hash=compute_content_hash(content[start_byte:end_byte]),
                 )
             )
+        # Top-level statements (C# 9+ Program.cs without an explicit Program class) (#31)
+        globals_nodes = [c for c in tree.root_node.children if c.type == "global_statement"]
+        if globals_nodes:
+            start_byte, end_byte = globals_nodes[0].start_byte, globals_nodes[-1].end_byte
+            symbols.append(
+                SymbolInfo(
+                    id=file_path + "::top_level_statements",
+                    file_path=file_path,
+                    parent_id=None,
+                    name="top_level_statements",
+                    kind="function",
+                    signature="top-level statements",
+                    docstring=None,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
+                    start_line=globals_nodes[0].start_point[0] + 1,
+                    end_line=globals_nodes[-1].end_point[0] + 1,
+                    content_hash=compute_content_hash(content[start_byte:end_byte]),
+                )
+            )
         self._disambiguate_overloads(symbols, calls)
 
         return ParseResult(

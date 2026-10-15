@@ -95,6 +95,27 @@ class TypeScriptParser(BaseParser):
             symbols=symbols,
             calls=calls,
         )
+        # Top-level import statements grouped as an addressable '::imports' block (like Python & C#)
+        # when the file declares other symbols alongside them.
+        head = [c for c in tree.root_node.children if c.type == "import_statement"]
+        if head and symbols:
+            start_byte, end_byte = head[0].start_byte, head[-1].end_byte
+            symbols.append(
+                SymbolInfo(
+                    id=file_path + "::imports",
+                    file_path=file_path,
+                    parent_id=None,
+                    name="imports",
+                    kind="imports",
+                    signature="import statements",
+                    docstring=None,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
+                    start_line=head[0].start_point[0] + 1,
+                    end_line=head[-1].end_point[0] + 1,
+                    content_hash=compute_content_hash(content[start_byte:end_byte]),
+                )
+            )
         self._disambiguate_overloads(symbols, calls)
 
         return ParseResult(
@@ -262,6 +283,7 @@ class TypeScriptParser(BaseParser):
                     continue
 
                 if not has_clause:
+                    before_len = len(symbols)
                     self._extract_symbols_and_calls(
                         node=child,
                         content=content,
@@ -271,6 +293,20 @@ class TypeScriptParser(BaseParser):
                         symbols=symbols,
                         calls=calls,
                     )
+                    # Include the leading 'export ' keyword in the span of the single top-level
+                    # exported declaration so read_block line 1 shows 'export ...' and replacing
+                    # line 1 with 'export ...' never produces 'export export ...' (#30).
+                    direct_exported = [
+                        s for s in symbols[before_len:]
+                        if s.parent_id == parent_id
+                    ]
+                    if len(direct_exported) == 1:
+                        sym = direct_exported[0]
+                        sym.start_byte = child.start_byte
+                        sym.start_line = child.start_point[0] + 1
+                        sym.content_hash = compute_content_hash(content[sym.start_byte : sym.end_byte])
+                        if not sym.signature.startswith("export "):
+                            sym.signature = "export " + sym.signature
                 continue
 
             if child.type in ("class_declaration", "abstract_class_declaration"):
