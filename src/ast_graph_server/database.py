@@ -29,18 +29,28 @@ def path_matches(file_path: str, file_pattern: Optional[str]) -> bool:
         file_pattern = file_pattern.default if str(file_pattern.default) != "PydanticUndefined" else None
     if not file_pattern:
         return True
-    if fnmatch.fnmatch(file_path, file_pattern):
-        return True
-    if fnmatch.fnmatch(Path(file_path).name, file_pattern):
-        return True
     normalized = file_path.replace("\\", "/")
-    if normalized.endswith(file_pattern):
+    norm_pattern = str(file_pattern).replace("\\", "/")
+    if fnmatch.fnmatch(normalized, norm_pattern):
         return True
+    if "**/" in norm_pattern:
+        collapsed = norm_pattern.replace("**/", "")
+        if fnmatch.fnmatch(normalized, collapsed):
+            return True
+    if "/" not in norm_pattern and fnmatch.fnmatch(Path(file_path).name, norm_pattern):
+        return True
+    if normalized.endswith(norm_pattern):
+        return True
+    prefix = re.split(r"[\*\?\[]", norm_pattern, maxsplit=1)[0].rstrip("/")
+    if prefix and "/" in norm_pattern and "*" not in norm_pattern.split("/")[-1]:
+        return normalized.startswith(prefix + "/")
+    if prefix and norm_pattern.endswith(("**", "/*", "/**/*")):
+        return normalized.startswith(prefix + "/")
     # A pattern that names a FOLDER scopes to everything under it: three searches
     # returned nothing at all because the caller passed a directory where a glob was
     # expected ("DataLinq.Enterprise/spark"), each costing a manual widening
     # (declared by the agent on mapab2 a r1 of the base c980d51).
-    return normalized.startswith(file_pattern.rstrip("/") + "/")
+    return normalized.startswith(norm_pattern.rstrip("/") + "/")
 
 
 def query_terms(query: str, limit: int = 12) -> List[str]:
@@ -704,6 +714,9 @@ class DatabaseManager:
                 fpath = r["file_path"]
                 if not self._inside_workspace(fpath):
                     continue
+                if any(part.startswith("_archive") for part in fpath.replace("\\", "/").split("/")):
+                    if not (file_pattern and "_archive" in str(file_pattern)):
+                        continue
                 if not path_matches(fpath, file_pattern):
                     continue
 

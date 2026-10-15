@@ -210,7 +210,15 @@ class ContextBuilder:
         printed = addr_map.get(str(symbol.id)) or addr_map.get(symbol.id, str(symbol.id))
         if level >= 3:
             metrics = self._metrics_for_symbol(symbol)
-            stamped = self._stamped_entry(printed, str(symbol.id), max_chars=max_chars, metrics=metrics)
+            effective_max = max_chars
+            if (
+                metrics is not None
+                and int(metrics.get("line_count") or 0) <= 120
+                and symbol.name
+                and symbol.name.lower() in getattr(self, "_current_query_lower", "")
+            ):
+                effective_max = max(max_chars or self.MAX_CONTENT_CHARS, 8000)
+            stamped = self._stamped_entry(printed, str(symbol.id), max_chars=effective_max, metrics=metrics)
             if stamped is not None:
                 return stamped
         base = symbol.kind + " " + printed + "  " + symbol.signature
@@ -541,6 +549,7 @@ class ContextBuilder:
         format: str = "text",
     ) -> Dict[str, Any]:
         self._clear_ephemeral_caches()
+        self._current_query_lower = (query or "").lower()
         # Resolve tiering configuration dynamically (allows live updates from context_config.json)
         cfg = tiering_config or self.tiering_config or ContextTieringConfig.load(workspace_root=self.config.workspace_root)
         effective_scope = scope or self.scope
