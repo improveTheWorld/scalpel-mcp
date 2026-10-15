@@ -260,7 +260,21 @@ def format_single_edit_result(res: Dict[str, Any]) -> str:
 
     is_noop = res.get("status") == "noop"
     suffix = " (unchanged)" if is_noop else ""
-    header = f"[ok] {block_id}{h_str}{lc_str}{suffix}"
+    if res.get("written_outside_block") or res.get("host_block_unchanged"):
+        created = (
+            res.get("created_section_id")
+            or res.get("created_symbol_id")
+            or (res.get("created_section_ids") or [None])[0]
+            or "sibling"
+        )
+        host_h = str(res.get("host_content_hash") or chash)[:8]
+        host_h_str = f" [h:{host_h}]" if host_h else ""
+        header = (
+            f"[ok] created sibling after {block_id} -> {created}{h_str}{lc_str} "
+            f"(host block unchanged{host_h_str})"
+        )
+    else:
+        header = f"[ok] {block_id}{h_str}{lc_str}{suffix}"
     lines = [header]
     all_warnings = list(res.get("warnings") or [])
     if is_noop and res.get("message") and res.get("message") not in all_warnings:

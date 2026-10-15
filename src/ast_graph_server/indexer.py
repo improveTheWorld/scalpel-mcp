@@ -80,16 +80,27 @@ class Indexer:
         """Check if path matches configured ignore patterns."""
         return self.should_ignore_relative(self.config.to_relative_posix(path))
 
-    def ignore_pattern_for(self, rel_posix: str) -> Optional[str]:
+    def ignore_pattern_for(self, rel_posix: str, include_discovery: bool = False) -> Optional[str]:
         """The first ignore pattern that matches, or None.
 
         Returning the PATTERN (not the name) is what lets a listing explain an empty
         directory without publishing the names of the files it hides.
+        When `include_discovery=True`, also checks `discovery_exclude_patterns` (used by
+        automatic workspace indexing, project map, and search discovery, while keeping
+        explicit `read_block` / `edit_block` calls unblocked on `reports/` or `benchmarks/results/`).
         """
-        patterns = self.config.ignore_patterns
+        patterns = list(self.config.ignore_patterns or [])
+        if include_discovery:
+            for extra in getattr(self.config, "discovery_exclude_patterns", None) or []:
+                if extra not in patterns:
+                    patterns.append(extra)
         if not patterns:
             return None
-        compiled = self._compiled_ignore_patterns()
+        compiled = (
+            self._compiled_discovery_patterns()
+            if include_discovery
+            else self._compiled_ignore_patterns()
+        )
         # normcase ONCE per path, not once per fnmatch call: on Windows fnmatch's
         # normcase is an LCMapStringEx syscall, and a 10 000-entry listing spent
         # 1 120 000 of them (112 per entry) -- 5.6 s of pure case folding.
@@ -107,14 +118,30 @@ class Indexer:
         return None
 
     def _compiled_ignore_patterns(self) -> List[Any]:
-        """fnmatch.translate() compiled, cached against the pattern list itself."""
         patterns = tuple(self.config.ignore_patterns)
-        cached = getattr(self, "_ignore_cache", None)
-        if cached is not None and cached[0] == patterns:
-            return cached[1]
-        compiled = [re.compile(fnmatch.translate(pattern)) for pattern in patterns]
-        self._ignore_cache = (patterns, compiled)
-        return compiled
+        cached = getattr(self, "_compiled_patterns", None)
+        if cached is None or cached[0] != patterns:
+            compiled = [
+                re.compile(fnmatch.translate(os.path.normcase(p).replace("\\", "/")))
+                for p in patterns
+            ]
+            self._compiled_patterns = (patterns, compiled)
+        return self._compiled_patterns[1]
+
+    def _compiled_discovery_patterns(self) -> List[Any]:
+        base = list(self.config.ignore_patterns or [])
+        for extra in getattr(self.config, "discovery_exclude_patterns", None) or []:
+            if extra not in base:
+                base.append(extra)
+        patterns = tuple(base)
+        cached = getattr(self, "_compiled_disc_patterns", None)
+        if cached is None or cached[0] != patterns:
+            compiled = [
+                re.compile(fnmatch.translate(os.path.normcase(p).replace("\\", "/")))
+                for p in patterns
+            ]
+            self._compiled_disc_patterns = (patterns, compiled)
+        return self._compiled_disc_patterns[1]
 
     def should_ignore_relative(self, rel_posix: str) -> bool:
         """The same test on a path the caller ALREADY made relative.
@@ -122,8 +149,10 @@ class Indexer:
         to_relative_posix resolves the path, so calling should_ignore once per child cost
         a full path resolution each time: ~1.1 ms per entry, 11 s for a 10 000-file
         directory. Nothing about the ignore decision needs the file system.
+        Includes `discovery_exclude_patterns` so automatic indexing and discovery skip
+        generated report/result trees while direct `read_block`/`edit_block` calls remain open.
         """
-        return self.ignore_pattern_for(rel_posix) is not None
+        return self.ignore_pattern_for(rel_posix, include_discovery=True) is not None
 
     def _is_supported(self, rel_posix: str) -> bool:
         if self.registry.get_parser_for_file(rel_posix):

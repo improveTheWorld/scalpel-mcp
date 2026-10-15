@@ -235,6 +235,10 @@ class Patcher:
         # 'validation.errors' and not one of them naming a line). The first entry of
         # 'validation.errors' is the parser's own sentence (line:col + snippet), so the
         # 'error' field repeats it verbatim rather than paraphrasing it.
+        if validation.get("note"):
+            validation["actionable_hint"] = (
+                validation["note"] + (" " + hint if hint else "")
+            )
         error = message
         if err_strings:
             error = error + " " + err_strings[0]
@@ -242,6 +246,7 @@ class Patcher:
             "status": "error",
             identifier_key: identifier,
             "error": error,
+            "actionable_hint": validation.get("actionable_hint", ""),
             "validation": validation,
         }
 
@@ -325,6 +330,11 @@ class Patcher:
         return None
 
     def _reject_duplicate(self, key: str, identifier: str, base: str) -> Dict[str, Any]:
+        hint = (
+            "Never submit a whole-file or whole-container payload into a single symbol. "
+            "Submit only the symbol's own declaration, or use edit_block with insert_after on the "
+            "last line of the target symbol to place a sibling declaration after it."
+        )
         return {
             "status": "error",
             key: identifier,
@@ -332,14 +342,11 @@ class Patcher:
                 "Mutation refused: it would duplicate the declaration '" + base + "'. "
                 "The file is left untouched."
             ),
+            "actionable_hint": hint,
             "validation": {
                 "syntax_ok": True,
                 "errors": ["duplicate declaration: " + base],
-                "actionable_hint": (
-                    "Never submit a whole-file or whole-container payload into a single symbol. "
-                    "Submit only the symbol's own declaration, or use a text tool when the change "
-                    "spans several declarations."
-                ),
+                "actionable_hint": hint,
             },
         }
 
@@ -540,7 +547,12 @@ class Patcher:
             tracing.note("resolved", block_id=block_id, kind="symbol", bytes=len(slice_bytes))
             return (
                 "symbol",
-                {"file_path": symbol.file_path, "symbol_kind": symbol.kind},
+                {
+                    "file_path": symbol.file_path,
+                    "symbol_kind": symbol.kind,
+                    "start_line": symbol.start_line,
+                    "end_line": symbol.end_line,
+                },
                 content,
                 abs_path,
                 raw,
@@ -618,6 +630,10 @@ class Patcher:
             if raw is None:
                 return None
             return self._document_block(block_id, abs_path, raw)
+        if "::" in block_id:
+            ft = self._file_text_block(block_id)
+            if ft is not None and ft[1].get("xml_alias"):
+                return ft
         return None
 
     @staticmethod
@@ -1330,6 +1346,12 @@ class Patcher:
             payload["package_references"] = packages[:100]
             payload["target_frameworks"] = sorted(set(frameworks))[:20]
             payload["project_references"] = projects[:50]
+            if file_bytes is not None:
+                payload["content_hash"] = compute_content_hash(file_bytes)
+            payload["actionable_hint"] = (
+                "Call read_block(path='" + block_id + "::xml') to read the numbered XML lines, "
+                "or edit_block(path='" + block_id + "', ...) to edit them."
+            )
             return payload
         if suffix == ".json":
             try:
@@ -2262,14 +2284,14 @@ class Patcher:
             "id": file_part,
             "error": (
                 "'" + file_part + "' is not a code file: no parser declares symbols in it and no "
-                "heading names a paragraph, so nothing here is addressed with ::. What it holds "
-                "is its STRUCTURE, not symbols."
+                "heading names a paragraph, so nothing here is addressed with :: (except '"
+                + file_part + "::xml' for raw XML text). What it holds is its STRUCTURE, not symbols."
             ),
             "holds": listed,
             "actionable_hint": (
-                "No :: address exists in this file. read_block('" + file_part + "') answers with "
-                "its structure -- " + listed + " -- which is the whole content a project or config "
-                "file has on this surface."
+                "read_block('" + file_part + "') answers with its structure (" + listed
+                + "); call read_block('" + file_part + "::xml') to read its numbered XML lines "
+                "or edit_block(path='" + file_part + "', ...) to edit them."
             ),
         }
     #: Ceiling for the raw text of a file no parser claims: above it the caller is told the
@@ -2317,9 +2339,8 @@ class Patcher:
                 ),
                 "actionable_hint": "search_documents finds the paragraphs that describe it.",
             }
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
+        text = self._decode_text_bytes(raw, allow_replace=False)
+        if text is None:
             return {
                 "status": "error",
                 "id": block_id,
@@ -2329,6 +2350,7 @@ class Patcher:
                 ),
                 "actionable_hint": "search_documents finds the paragraphs that describe it.",
             }
+        raw_hash = compute_content_hash(text.encode("utf-8")) if raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf")) else compute_content_hash(raw)
         return {
             "status": "success",
             "id": block_id,
@@ -2336,7 +2358,7 @@ class Patcher:
             "file_path": normalized,
             "line_count": len(text.splitlines()),
             "bytes": len(raw),
-            "content_hash": compute_content_hash(raw),
+            "content_hash": raw_hash,
             "numbered_text": numbered(text, 1),
             "read_only": False,
             "actionable_hint": (
@@ -2562,6 +2584,8 @@ class Patcher:
                 # children array is ambiguous"). Say what the emptiness IS.
                 payload["root_text_empty"] = True
                 payload["preamble_line_count"] = 0
+                if not error and text:
+                    payload["file_content_hash"] = compute_content_hash(text.encode("utf-8"))
                 payload["actionable_hint"] = (
                     "This file's own text -- the preamble no heading owns -- is EMPTY (0 lines before first heading): every line of it "
                     "sits under a heading, and those paragraphs are the children below. Read the one "
@@ -2587,6 +2611,8 @@ class Patcher:
         if kind == "symbol":
             payload["symbol_kind"] = meta["symbol_kind"]
             payload["bytes"] = len(content.encode("utf-8"))
+            if meta.get("start_line") and meta.get("end_line"):
+                payload["lines"] = [int(meta["start_line"]), int(meta["end_line"])]
         elif kind == "section":
             payload["heading"] = meta["heading"]
             payload["level"] = int(meta["level"])
@@ -2722,15 +2748,25 @@ class Patcher:
         return self._edit_block_locked(block_id, ops, expected_hash)
 
     def _file_text_block(self, block_id: str):
-        """Resolve a flat/unmapped file (or containerless code file) as a single 'file_text' block."""
-        if not block_id or "::" in block_id or "#" in block_id:
+        """Resolve a flat/unmapped file (or containerless code file or ::xml project block) as a single 'file_text' block."""
+        if not block_id or "#" in block_id:
             return None
-        if self._outside_the_workspace(block_id) or self._degenerate_id_refusal(block_id) is not None:
+        xml_alias = False
+        lookup_id = block_id
+        if "::" in block_id:
+            file_part, _, sub = block_id.partition("::")
+            if sub.strip().lower() in ("xml", "raw", "text", "file_text") and Path(file_part).suffix.lower() in (".csproj", ".props", ".targets", ".xml"):
+                lookup_id = file_part.strip()
+                xml_alias = True
+            else:
+                return None
+        if self._outside_the_workspace(lookup_id) or self._degenerate_id_refusal(lookup_id) is not None:
             return None
-        abs_file = self._existing_path(block_id)
+        abs_file = self._existing_path(lookup_id)
         if abs_file is None or not abs_file.is_file():
             return None
-        if self._is_markdown(block_id) or self._structured_summary(block_id, abs_file) is not None:
+        is_xml_project = abs_file.suffix.lower() in (".csproj", ".props", ".targets", ".xml")
+        if self._is_markdown(lookup_id) or (not is_xml_project and self._structured_summary(lookup_id, abs_file) is not None):
             return None
         rel_path = self._relative_path(abs_file)
         indexer = getattr(self, "indexer", None)
@@ -2738,8 +2774,8 @@ class Patcher:
             return None
         supported = getattr(indexer, "_is_supported", None)
         is_supported = bool(supported is not None and (supported(rel_path) or supported(str(abs_file))))
-        if is_supported:
-            rows = self._symbol_rows(rel_path) or self._symbol_rows(block_id)
+        if is_supported and not is_xml_project:
+            rows = self._symbol_rows(rel_path) or self._symbol_rows(lookup_id)
             has_containers = any(
                 r.get("kind") in ("function", "class", "method", "interface", "struct", "record", "enum")
                 for r in rows
@@ -2752,20 +2788,42 @@ class Patcher:
             return None
         if len(raw) > self.RAW_FILE_MAX_BYTES:
             return None
-        try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            if not is_supported:
-                return None
-            content = raw.decode("utf-8", errors="replace")
+        content = self._decode_text_bytes(raw, allow_replace=is_supported)
+        if content is None:
+            return None
         return (
             "file_text",
-            {"file_path": rel_path},
+            {"file_path": rel_path, "xml_alias": xml_alias},
             content,
             abs_file,
             raw,
             (0, len(raw)),
         )
+
+    @staticmethod
+    def _decode_text_bytes(raw: bytes, allow_replace: bool = False) -> Optional[str]:
+        """Decode UTF-8 or UTF-16LE/BE (with BOM) file bytes to text (#34)."""
+        if raw.startswith(b"\xff\xfe"):
+            try:
+                return raw[2:].decode("utf-16-le")
+            except UnicodeDecodeError:
+                pass
+        elif raw.startswith(b"\xfe\xff"):
+            try:
+                return raw[2:].decode("utf-16-be")
+            except UnicodeDecodeError:
+                pass
+        elif raw.startswith(b"\xef\xbb\xbf"):
+            try:
+                return raw[3:].decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if allow_replace:
+                return raw.decode("utf-8", errors="replace")
+            return None
 
     def _edit_block_locked(
         self,
@@ -2892,8 +2950,11 @@ class Patcher:
             }
 
         if kind == "section":
+            sec_lines = content.splitlines()
             for op_idx, one in enumerate(ops or []):
-                if isinstance(one, dict) and one.get("insert_after") == 0:
+                if not isinstance(one, dict):
+                    continue
+                if one.get("insert_after") == 0:
                     frag = str(one.get("content") or "")
                     if frag.strip() and self._leading_markdown_heading(frag) is None:
                         return {
@@ -2906,12 +2967,74 @@ class Patcher:
                                 "(above the section, splitting it into a duplicate section). Nothing was written."
                             ),
                             "content_hash": current_hash,
-                            "line_count": len(content.splitlines()),
+                            "line_count": len(sec_lines),
                             "numbered_text": numbered(content, 1),
                             "actionable_hint": (
                                 "Use insert_after: 1 to insert at the start of the section body (right under "
                                 "the heading on line 1), or pass a '#' heading at line 0 if you intended to "
                                 "create a preceding sibling section."
+                            ),
+                        }
+                ins_pos = one.get("insert_after")
+                if isinstance(ins_pos, int) and 1 <= ins_pos <= len(sec_lines):
+                    prefix_text = "\n".join(sec_lines[:ins_pos])
+                    open_fence_at = unclosed_fence_line(prefix_text)
+                    if open_fence_at is not None:
+                        frag = str(one.get("content") or "")
+                        has_fence = any(
+                            line.strip().startswith(("```", "~~~"))
+                            for line in frag.splitlines()
+                        )
+                        if has_fence:
+                            close_line = ins_pos
+                            for k in range(ins_pos, len(sec_lines)):
+                                if sec_lines[k].strip().startswith(("```", "~~~")):
+                                    close_line = k + 1
+                                    break
+                            return {
+                                "status": "error",
+                                "block_id": block_id,
+                                "error": (
+                                    "Refused: op " + str(op_idx) + " uses insert_after: " + str(ins_pos)
+                                    + " inside an open Markdown code fence (opened at line " + str(open_fence_at)
+                                    + " and closed at line " + str(close_line) + "), while its content also "
+                                    "contains a code fence marker ('```' or '~~~'). Inserting a fenced block "
+                                    "before the closing fence corrupts the surrounding code block. Nothing was written."
+                                ),
+                                "content_hash": current_hash,
+                                "line_count": len(sec_lines),
+                                "numbered_text": numbered(content, 1),
+                                "actionable_hint": (
+                                    "Use insert_after: " + str(close_line) + " to insert AFTER the closing "
+                                    "code fence on line " + str(close_line) + ", or omit the fence markers "
+                                    "from your content if you meant to add code inside the existing block."
+                                ),
+                            }
+                if "replace" in one and isinstance(one["replace"], (list, tuple)) and len(one["replace"]) == 2:
+                    dropped_check = self._heading_range_drops_a_bullet([one], content)
+                    if dropped_check is not None:
+                        drop_num, drop_txt = dropped_check
+                        r_first, r_last = one["replace"][0], one["replace"][1]
+                        return {
+                            "status": "error",
+                            "block_id": block_id,
+                            "error": (
+                                "NOTHING was written: op " + str(op_idx) + " (replace [" + str(r_first)
+                                + ", " + str(r_last) + "]) covers line " + str(drop_num)
+                                + ", a sub-bullet of the titled item above it ('" + drop_txt[:80]
+                                + "'), and your replacement content carries no bullet, which would "
+                                "silently delete that sub-item (a replace range is inclusive)."
+                            ),
+                            "offending_op": op_idx,
+                            "dropped_bullet_line": drop_num,
+                            "content_hash": current_hash,
+                            "line_count": len(sec_lines),
+                            "numbered_text": numbered(content, 1),
+                            "actionable_hint": (
+                                "Shrink the replace range to [" + str(r_first) + ", " + str(drop_num - 1)
+                                + "] if you only meant to update the title line, or include the sub-bullet "
+                                "in your replacement content. To delete the sub-bullet intentionally, use "
+                                "a delete operation."
                             ),
                         }
         applied = apply_ops(content, ops, lambda fragment, _column: fragment)
@@ -2938,7 +3061,7 @@ class Patcher:
                 )
             return error
         insert_duplicate: Optional[str] = None
-        repeated = self._newly_repeated_line(content, applied.text)
+        repeated = self._newly_repeated_line(content, applied.text, ops=ops)
         duplicated = repeated[0] if repeated else None
         was_at = repeated[1] if repeated else 0
         # WHICH OPERATION RE-EMITTED IT, named by its index -- the other half the agent
@@ -2977,8 +3100,8 @@ class Patcher:
                     "error": (
                         "NOTHING was written: op " + str(from_op) + " of your content re-emits the"
                         " line '" + duplicated.strip() + "', which the block you read held ONCE,"
-                        " at line " + str(was_at) + ". The result would hold it twice (at "
-                        + places + "). A replace range is INCLUSIVE: the line just outside it (a-1 "
+                        " at line " + str(was_at) + " (in the block you read). The result would hold it twice (at "
+                        + places + " of the resulting block). A replace range is INCLUSIVE: the line just outside it (a-1 "
                         "or b+1) is NOT consumed by the replacement."
                     ),
                     "offending_op": from_op,
@@ -2988,7 +3111,8 @@ class Patcher:
                     "line_count": len(content.splitlines()),
                     "numbered_text": numbered(content, 1),
                     "actionable_hint": (
-                        "Drop that line from your content, or extend the range over it, and re-send: "
+                        "Drop that line from your content, or extend the range to include line "
+                        + str(was_at) + " of the numbered_text above, and re-send: "
                         "the block is untouched and the numbered_text above is current, so no "
                         "read_block is needed."
                     ),
@@ -3403,6 +3527,7 @@ class Patcher:
         self._call_state = {}
         try:
             self._capturing_stamps = True
+            self._batch_path_map: Dict[str, str] = {}
             previews: List[Dict[str, Any]] = []
             self._preview_pass = True
             try:
@@ -3416,6 +3541,19 @@ class Patcher:
             if refusal is not None:
                 return refusal
             for index, entry in enumerate(entries):
+                raw_path = str(entry.get("path") or "")
+                if raw_path and getattr(self, "_batch_path_map", None):
+                    for old_prefix, new_prefix in sorted(
+                        self._batch_path_map.items(), key=lambda kv: len(kv[0]), reverse=True
+                    ):
+                        if raw_path == old_prefix:
+                            entry["path"] = new_prefix
+                            entry["_original_path"] = raw_path
+                            break
+                        if raw_path.startswith(old_prefix + "::"):
+                            entry["path"] = new_prefix + raw_path[len(old_prefix):]
+                            entry["_original_path"] = raw_path
+                            break
                 self._remember_file(entry, originals)
                 self._batch_entry_index = index
                 entry["_file_key"] = self._file_of(entry.get("path"), entry)
@@ -3426,19 +3564,43 @@ class Patcher:
                 # for every entry after the first, and hand the rebaser a version that is
                 # already one entry ahead.
                 path_used = str(entry.get("path"))
+                orig_used = str(entry.get("_original_path") or "")
+                if orig_used and orig_used in self._call_block_hashes and path_used not in self._call_block_hashes:
+                    self._call_block_hashes[path_used] = self._call_block_hashes[orig_used]
                 if path_used and path_used not in self._call_state:
-                    self._begin_block_state(
+                    st = self._begin_block_state(
                         path_used,
                         (self._block_and_kind(path_used) or self._file_text_block(path_used))
                         if path_used else None,
                     )
-                results.append(self._batch_entry(entry, index))
+                    if st is not None and orig_used:
+                        target_abs = st.get("abs")
+                        for other_st in self._call_state.values():
+                            if other_st is not st and other_st.get("abs") == target_abs:
+                                st["start_bytes"] = other_st["start_bytes"]
+                                break
+                ans = self._batch_entry(entry, index)
+                if (
+                    isinstance(ans, dict)
+                    and ans.get("status") == "success"
+                    and ans.get("heading")
+                    and "::" in path_used
+                ):
+                    new_title = section_title(str(ans["heading"]))
+                    old_parent_prefix, _, old_seg = path_used.rpartition("::")
+                    if new_title and self._fold_name(new_title) != self._fold_name(section_title(old_seg)):
+                        new_full = old_parent_prefix + "::" + new_title
+                        self._batch_path_map[path_used] = new_full
+                        if orig_used and orig_used != path_used:
+                            self._batch_path_map[orig_used] = new_full
+                results.append(ans)
             saved_batch_after = dict(self._batch_after) if self._batch_after else {}
         finally:
             self._batch_originals = None
             self._batch_after = None
             self._call_state = None
             self._call_block_hashes = {}
+            self._batch_path_map = {}
             self._last_translation = None
             self._batch_entry_index = 0
             self._edits_lock.releases(wanted)
@@ -4275,7 +4437,9 @@ class Patcher:
     }
 
     @classmethod
-    def _newly_repeated_line(cls, before: str, after: str) -> Optional[Tuple[str, int]]:
+    def _newly_repeated_line(
+        cls, before: str, after: str, ops: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[Tuple[str, int]]:
         """A line the edit made appear twice, NEXT TO its original copy, and where it WAS.
 
         COUNTED and BOUNDED, which the two earlier versions each got half of:
@@ -4285,22 +4449,33 @@ class Patcher:
           positive (a r1 and a r3 of the base 9e506c5, runs 34/38 of b2c82d5);
         - common syntax guard lines ('if self.suppression:', 'return None', etc.) are ignored
           as they legitimately repeat within short error handling blocks;
-        - the two copies must sit within 4 lines. The two real
-          'builder = builder.Config(...)' statements are 16 lines apart and are not a copy
-          (run 38, base b2c82d5); the accidental copy a replace range makes sits
-          immediately next to the line it re-emitted.
-        A replace range is INCLUSIVE, so the copy is usually the line just outside it
-        (a-1 or b+1); the count rule also catches it when the range was simply too short.
+        - if `ops` is provided and a `replace [first, last]` operation consumed the original
+          occurrence at `was_at` (`first <= was_at <= last`), any multiple occurrences of that
+          line came strictly from inside the new replacement `content` itself (e.g. a statement
+          legitimately written in both a `try` and a `catch` branch) rather than from failing
+          to consume an adjacent boundary line: that is not a boundary duplication;
+        - the two copies must sit within 4 non-blank lines (ignoring blank separator lines so
+          that a boundary line separated by blank lines is still caught, run9 v0.4.1).
         """
+        before_lines = before.splitlines()
         counts_before: Dict[str, int] = {}
-        for line in before.splitlines():
+        for line in before_lines:
             if line.strip():
                 counts_before[line] = counts_before.get(line, 0) + 1
 
+        after_lines = after.splitlines()
         seen_at: Dict[str, List[int]] = {}
-        for index, line in enumerate(after.splitlines()):
+        for index, line in enumerate(after_lines):
             if line.strip():
                 seen_at.setdefault(line, []).append(index)
+
+        replaced_ranges: List[Tuple[int, int]] = []
+        for op in ops or []:
+            if isinstance(op, dict) and isinstance(op.get("replace"), (list, tuple)) and len(op["replace"]) == 2:
+                try:
+                    replaced_ranges.append((int(op["replace"][0]), int(op["replace"][1])))
+                except (TypeError, ValueError):
+                    pass
 
         for line, places in seen_at.items():
             stripped = line.strip()
@@ -4308,18 +4483,23 @@ class Patcher:
                 continue
             if counts_before.get(line, 0) != 1:
                 continue
-            gap = min(second - first for first, second in zip(places, places[1:]))
-            if gap <= 4:
-                # THE CALLER COORDINATE, RETURNED WITH THE LINE. `places` are positions in the
-                # AFTER text -- the file the caller has never seen. Measured twice (fix1 t27,
-                # s10 t27): the refusal announced "at line 12 and line 16" for a 12-line block,
-                # and the agent wrote back that it had to "re-derive the cause myself". The line
-                # occurred EXACTLY ONCE before (the guard above), so its position in what the
-                # caller read is the one position that means something to it.
-                was_at = next(
-                    (i + 1 for i, one in enumerate(before.splitlines()) if one == line),
-                    0,
-                )
+            was_at = next(
+                (i + 1 for i, one in enumerate(before_lines) if one == line),
+                0,
+            )
+            # If the original occurrence at `was_at` was INSIDE a replaced range [first, last],
+            # the original line WAS consumed by the replacement; both copies in `after` were
+            # intentionally emitted inside the replacement's own content (e.g. try/catch).
+            if was_at and any(first <= was_at <= last for first, last in replaced_ranges):
+                continue
+            # Measure distance both in raw lines and in non-blank lines (so blank separator
+            # lines between the replacement and the unconsumed boundary line do not hide the copy).
+            raw_gap = min(second - first for first, second in zip(places, places[1:]))
+            non_blank_gap = min(
+                sum(1 for k in range(first + 1, second + 1) if after_lines[k].strip())
+                for first, second in zip(places, places[1:])
+            )
+            if raw_gap <= 4 or non_blank_gap <= 2:
                 return line, was_at
         return None
 

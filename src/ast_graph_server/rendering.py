@@ -80,9 +80,11 @@ def render_symbol_view(payload: Dict[str, Any]) -> str:
     """The detail block a search inlines, so finding and reading cost one turn."""
     if payload.get("view") == "implementation":
         lines = payload.get("lines") or ["?", "?"]
+        lc = payload.get("line_count")
+        block_span = f" (block lines 1..{lc})" if lc else ""
         header = (
             "  implementation " + str(payload.get("file", ""))
-            + " L" + str(lines[0]) + "-" + str(lines[1])
+            + " L" + str(lines[0]) + "-" + str(lines[1]) + block_span
         )
         content_hash = str(payload.get("content_hash") or "")
         if content_hash:
