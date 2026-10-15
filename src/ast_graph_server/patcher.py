@@ -3209,6 +3209,7 @@ class Patcher:
                     # have written the code TWICE. The fields of the block stay truthful; the fact is
                     # named, and the file listing hands over the address of what now follows it.
                     result["written_outside_block"] = True
+                    result["host_content_hash"] = after.get("content_hash", current_hash)
                     file_path = str(block_id).split("::")[0]
                     written = self._written_beyond_block(target_id, file_path, content, applied.text)
                     if written is not None:

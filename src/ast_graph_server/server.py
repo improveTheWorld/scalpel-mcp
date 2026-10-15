@@ -1067,11 +1067,11 @@ class ASTGraphServer:
                         "entry when the call carries several."
                     ]
                 for index, owner in sorted(inferred.items()):
+                    if index < len(results) and isinstance(results[index], dict) and results[index].get("status") == "error":
+                        continue
                     payload["warnings"] = list(payload.get("warnings") or []) + [
                         "entry " + str(index) + " of edits carried no path: its expected_hash belongs "
-                        "to exactly ONE block, '" + owner + "', so the entry was addressed to it. Send the "
-                        "path inside every entry: with a hash shared by several blocks, or one that "
-                        "matches none, the entry is refused."
+                        "to '" + owner + "', so the entry was addressed to it."
                     ]
                 # A batch refused WHOLE carries its own repair sentence ("every entry still
                 # matches the file, because nothing was written"), which the count below would

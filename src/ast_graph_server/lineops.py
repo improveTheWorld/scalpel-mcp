@@ -262,9 +262,11 @@ def format_single_edit_result(res: Dict[str, Any]) -> str:
     suffix = " (unchanged)" if is_noop else ""
     if res.get("written_outside_block") or res.get("host_block_unchanged"):
         created = (
-            res.get("created_section_id")
+            res.get("written_block_id")
+            or res.get("created_section_id")
             or res.get("created_symbol_id")
             or (res.get("created_section_ids") or [None])[0]
+            or ((res.get("created_symbols") or [{}])[0].get("id") if res.get("created_symbols") else None)
             or "sibling"
         )
         host_h = str(res.get("host_content_hash") or chash)[:8]
