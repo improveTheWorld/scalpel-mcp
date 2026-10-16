@@ -101,7 +101,9 @@ def empty_document_list_note(
         )
     return "No document is indexed yet."
 
-def _file_pattern_clause(db: DatabaseManager, file_pattern: str, on_disk: int = 0) -> str:
+def _file_pattern_clause(
+    db: DatabaseManager, file_pattern: str, on_disk: int = 0, target_kind: str = "symbols"
+) -> str:
     """What a `file_pattern` selected: a checked fact, not a taught rule.
 
     The message used to add "(a folder is 'folder/*')". That became false the day a
@@ -123,6 +125,12 @@ def _file_pattern_clause(db: DatabaseManager, file_pattern: str, on_disk: int = 
             "no indexed file matches that pattern (check the path; a folder scopes to "
             "its content)"
         )
+    if target_kind == "documents":
+        return (
+            str(len(matching))
+            + " indexed file(s) match the path filter, and none contains a paragraph matching the query "
+            "(none carries the query)"
+        )
     return (
         str(len(matching))
         + " indexed file(s) match the path filter, and none declares a symbol matching the query "
@@ -136,6 +144,7 @@ def empty_symbol_search_note(
     kind: str,
     file_pattern: Optional[str],
     on_disk: int = 0,
+    patcher: Optional[Any] = None,
 ) -> str:
     """Why a symbol search is empty -- and NEVER a cause the tool has not checked.
 
@@ -167,7 +176,14 @@ def empty_symbol_search_note(
     # fact instead of teaching the rule.
     prose = db.search_documents(query=query, limit=5)
     if prose:
-        sample = ", ".join(str(hit["section_id"]) for hit in prose[:3])
+        sample = ", ".join(
+            (
+                patcher.displayed_section_id(str(hit["section_id"]))
+                if patcher is not None and hasattr(patcher, "displayed_section_id")
+                else str(hit["section_id"])
+            )
+            for hit in prose[:3]
+        )
         clause = (
             " No symbol does, but " + str(len(prose)) + " document paragraph(s) do: " + sample
             + ". The requirement is in prose, not in code."
@@ -190,6 +206,7 @@ def empty_document_search_note(
     query: str,
     file_pattern: Optional[str],
     on_disk: int = 0,
+    patcher: Optional[Any] = None,
 ) -> str:
     """Why a document search is empty -- checked, not guessed.
 
@@ -204,9 +221,16 @@ def empty_document_search_note(
     query = str(query or "")
     if file_pattern:
         elsewhere = db.search_documents(query=query, limit=3)
-        clause = _file_pattern_clause(db, file_pattern, on_disk)
+        clause = _file_pattern_clause(db, file_pattern, on_disk, target_kind="documents")
         if elsewhere:
-            sample = ", ".join(str(match["section_id"]) for match in elsewhere[:3])
+            sample = ", ".join(
+                (
+                    patcher.displayed_section_id(str(match["section_id"]))
+                    if patcher is not None and hasattr(patcher, "displayed_section_id")
+                    else str(match["section_id"])
+                )
+                for match in elsewhere[:3]
+            )
             return (
                 "No paragraph matches '" + query + "' under file_pattern '" + file_pattern
                 + "': " + clause + ". " + str(len(elsewhere))
@@ -611,7 +635,7 @@ class ASTGraphServer:
             note = ""
             if not matches and not errors:
                 note = empty_symbol_search_note(
-                    self.db, query, kind, path, self._disk_matches(path)
+                    self.db, query, kind, path, self._disk_matches(path), patcher=self.patcher
                 )
             # EXTERNAL contracts (NuGet packages the .csproj files reference), AFTER the workspace
             # matches and outside their `limit`: the workspace stays first, and the externals are
@@ -1068,6 +1092,19 @@ class ASTGraphServer:
                 }
                 if "error" in reply:
                     payload["error"] = reply["error"]
+                if applied == 0 and refused > 0:
+                    for r in results:
+                        if (
+                            isinstance(r, dict)
+                            and r.get("status") == "error"
+                            and r.get("numbered_text")
+                            and len(str(r.get("numbered_text"))) > 600
+                            and not any(
+                                k in r
+                                for k in ("expected_hash_belongs_to", "hash_differs_at", "out_of_bounds")
+                            )
+                        ):
+                            r.pop("numbered_text", None)
                 if applied == 0 and refused > 0 and "error" not in payload:
                     refused_indices = [
                         i for i, r in enumerate(results)
@@ -1641,7 +1678,7 @@ class ASTGraphServer:
             if not matches:
                 # An empty answer must say what was checked, never nothing at all.
                 note = empty_document_search_note(
-                    self.db, query_str, path, self._disk_matches(path)
+                    self.db, query_str, path, self._disk_matches(path), patcher=self.patcher
                 )
             if safe_format == "json":
                 payload: Dict[str, Any] = {"status": "success", "count": len(matches), "matches": matches}
