@@ -193,7 +193,7 @@ async def test_a_folder_pattern_scopes_and_an_empty_search_explains_itself(tmp_p
     )
     assert empty["count"] == 0
     assert "WITHOUT it" in empty["text"]
-    assert "docs/a.md#guide" in empty["text"]
+    assert "docs/a.md::Guide" in empty["text"]
     # "other" selects no file at all, and the message says exactly that.
     assert "no indexed file matches that pattern" in empty["text"]
     # The note used to teach "(a folder is 'folder/*')" -- advice that outlived the

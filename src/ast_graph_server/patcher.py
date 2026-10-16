@@ -3211,6 +3211,56 @@ class Patcher:
                                         ),
                                     }
                 if "replace" in one and isinstance(one["replace"], (list, tuple)) and len(one["replace"]) == 2:
+                    # #56: Refusal when replace [first, last] starts on an opening code fence line
+                    # (e.g. line 23 '```csharp') and replaces through its closing fence (e.g. line 31 '```'),
+                    # while the replacement content starts with code (omitting the opening fence) and
+                    # includes the closing fence '```', which flips fence parity across the rest of the section.
+                    try:
+                        rf_first, rf_last = int(one["replace"][0]), int(one["replace"][1])
+                    except (TypeError, ValueError):
+                        rf_first, rf_last = 0, 0
+                    if (
+                        1 <= rf_first <= len(sec_lines)
+                        and rf_first <= rf_last <= len(sec_lines)
+                        and sec_lines[rf_first - 1].strip().startswith(("```", "~~~"))
+                        and unclosed_fence_line("\n".join(sec_lines[: rf_first - 1])) is None
+                    ):
+                        opening_fence_line = sec_lines[rf_first - 1].strip()
+                        frag = str(one.get("content") or "")
+                        frag_non_blank = [ln.strip() for ln in frag.splitlines() if ln.strip()]
+                        frag_fence_count = sum(
+                            1 for ln in frag_non_blank if ln.startswith(("```", "~~~"))
+                        )
+                        if (
+                            frag_non_blank
+                            and not frag_non_blank[0].startswith(("```", "~~~"))
+                            and frag_fence_count % 2 == 1
+                        ):
+                            return {
+                                "status": "error",
+                                "block_id": block_id,
+                                "error": (
+                                    "Refused: op " + str(op_idx) + " (replace [" + str(rf_first)
+                                    + ", " + str(rf_last) + "]) replaces line " + str(rf_first)
+                                    + " ('" + opening_fence_line + "', the opening code fence) with "
+                                    "content that starts without an opening fence ('"
+                                    + frag_non_blank[0][:60] + "') while still emitting a closing "
+                                    "fence. That deletes the opening fence on line " + str(rf_first)
+                                    + " and leaves the code fences in '" + str(block_id)
+                                    + "' unbalanced. Nothing was written."
+                                ),
+                                "offending_op": op_idx,
+                                "content_hash": current_hash,
+                                "line_count": len(sec_lines),
+                                "numbered_text": numbered(content, 1),
+                                "actionable_hint": (
+                                    "Include '" + opening_fence_line + "' on the first line of your "
+                                    "replacement content, or shrink the replace range to ["
+                                    + str(rf_first + 1) + ", " + str(rf_last) + "] to keep line "
+                                    + str(rf_first) + ", or use insert_after: " + str(rf_last)
+                                    + " to insert after the existing code block."
+                                ),
+                            }
                     dropped_check = self._heading_range_drops_a_bullet([one], content)
                     if dropped_check is not None:
                         drop_num, drop_txt = dropped_check
@@ -3264,6 +3314,50 @@ class Patcher:
             dup_ord = self._markdown_duplicate_ordinal(content, applied.text)
             if dup_ord is not None:
                 num_str, l1, l2 = dup_ord
+                if "_before_" in num_str:
+                    k_str, m_str = num_str.split("_before_", 1)
+                    after_lines = applied.text.splitlines()
+                    m_indent = len(after_lines[l2 - 1]) - len(after_lines[l2 - 1].lstrip()) if l2 <= len(after_lines) else 0
+                    orig_lines = content.splitlines()
+                    # Find where item m_str ends in the original block so we can prescribe the exact insert_after line
+                    insert_target_line = len(orig_lines)
+                    for orig_idx, orig_ln in enumerate(orig_lines, 1):
+                        if re.match(r"^\s*" + re.escape(m_str) + r"[.)]\s+\S", orig_ln):
+                            insert_target_line = orig_idx
+                            p = orig_idx
+                            while p < len(orig_lines):
+                                nxt = orig_lines[p]
+                                if not nxt.strip():
+                                    p += 1
+                                    continue
+                                nxt_ind = len(nxt) - len(nxt.lstrip())
+                                if nxt_ind > m_indent:
+                                    insert_target_line = p + 1
+                                    p += 1
+                                else:
+                                    break
+                            break
+                    return {
+                        "status": "error",
+                        "block_id": block_id,
+                        "error": (
+                            "NOTHING was written: your edit places ordered list item '" + k_str
+                            + ".' (at line " + str(l1) + " of the resulting block) BEFORE existing item '"
+                            + m_str + ".' (at line " + str(l2) + "), producing an out-of-order sequence ("
+                            + k_str + ". before " + m_str + ".)."
+                        ),
+                        "duplicated_ordinal": num_str,
+                        "content_hash": current_hash,
+                        "line_count": len(orig_lines),
+                        "numbered_text": numbered(content, 1),
+                        "actionable_hint": (
+                            "To place item '" + k_str + ".' AFTER item '" + m_str
+                            + ".', use insert_after: " + str(insert_target_line)
+                            + " (the last line of item '" + m_str + ".'). Or if you meant to insert "
+                            "before item '" + m_str + ".', number your new item '" + m_str
+                            + ".' and extend a replace range to renumber the following items."
+                        ),
+                    }
                 return {
                     "status": "error",
                     "block_id": block_id,
@@ -3379,6 +3473,40 @@ class Patcher:
                 touches_last_line=touches_last,
                 block_lines=block_lines,
             )
+            if result.get("status") == "error":
+                result.setdefault("content_hash", current_hash)
+                result.setdefault("line_count", block_lines)
+                result.setdefault("numbered_text", numbered(content, 1))
+                start_line = int(meta.get("start_line") or 1)
+                if start_line > 1:
+                    sym_lines = content.splitlines()
+                    for one in ops or []:
+                        if isinstance(one, dict) and isinstance(one.get("replace"), (list, tuple)) and len(one["replace"]) == 2:
+                            try:
+                                r_first, r_last = int(one["replace"][0]), int(one["replace"][1])
+                            except (TypeError, ValueError):
+                                continue
+                            cand_first = r_first - start_line + 1
+                            cand_last = r_last - start_line + 1
+                            if 1 <= cand_first <= len(sym_lines) and 1 <= cand_last <= len(sym_lines):
+                                cand_line = sym_lines[cand_first - 1].strip()
+                                sub_first = next((ln.strip() for ln in str(one.get("content") or "").splitlines() if ln.strip()), "")
+                                cand_tokens = set(re.findall(r"[A-Za-z_]\w{2,}", cand_line))
+                                sub_tokens = set(re.findall(r"[A-Za-z_]\w{2,}", sub_first))
+                                if cand_tokens & sub_tokens:
+                                    coord_note = (
+                                        f"Coordinate mismatch: '{block_id}' starts at file line {start_line}, "
+                                        f"so file line {r_first} is block line {cand_first} ('{cand_line[:70]}'), "
+                                        f"whereas block line {r_first} is '{sym_lines[r_first - 1].strip()[:70]}'. "
+                                        f"Use replace: [{cand_first}, {cand_last}] (1-based block line numbers)."
+                                    )
+                                    result["error"] = str(result.get("error") or "") + " " + coord_note
+                                    result["actionable_hint"] = (
+                                        coord_note + " " + str(result.get("actionable_hint") or "")
+                                    ).strip()
+                                    if isinstance(result.get("validation"), dict):
+                                        result["validation"]["actionable_hint"] = result["actionable_hint"]
+                                    break
         elif kind == "document":
             result = self.update_document_root(target_id, new_content=applied.text)
         elif kind == "file_text":
@@ -3412,6 +3540,32 @@ class Patcher:
                 )
             return result
         if result.get("status") in ("success", "noop"):
+            if result.get("status") == "noop" and ops and len(ops) >= 2:
+                del_ranges = [
+                    (int(op["delete"][0]), int(op["delete"][1]))
+                    for op in ops
+                    if isinstance(op, dict)
+                    and isinstance(op.get("delete"), (list, tuple))
+                    and len(op["delete"]) == 2
+                ]
+                ins_positions = [
+                    int(op["insert_after"])
+                    for op in ops
+                    if isinstance(op, dict) and isinstance(op.get("insert_after"), int)
+                ]
+                for d_first, d_last in del_ranges:
+                    if d_last in ins_positions or (d_first - 1) in ins_positions:
+                        cancel_msg = (
+                            f"op delete [{d_first}, {d_last}] and insert_after: {d_last if d_last in ins_positions else d_first - 1} "
+                            "cancelled each other out: operations are applied bottom-up against the line numbers you read, "
+                            f"so inserting after line {d_last} places the lines right back where delete [{d_first}, {d_last}] "
+                            "removed them. To move or reorder lines, use a single replace: [first, last] covering the whole span."
+                        )
+                        result["message"] = str(result.get("message") or "") + " (" + cancel_msg + ")"
+                        warnings = list(result.get("warnings") or [])
+                        warnings.append(cancel_msg)
+                        result["warnings"] = warnings
+                        break
             after = self.read_block(block_id)
             if after.get("status") == "success":
                 result["content_hash"] = after.get("content_hash", result.get("content_hash"))
@@ -4830,6 +4984,41 @@ class Patcher:
         for body_str, l1, l2 in find_body_dups(after):
             if body_str not in before_body_dups:
                 return body_str, l1, l2
+
+        # #52: Also detect out-of-order / inverted consecutive ordinals in the same ordered list
+        # (e.g. '4. **OAuth...**' inserted immediately before an existing '3. **Unity Catalog...**'
+        # producing 1, 2, 4, 3).
+        def find_inversions(text: str) -> List[Tuple[str, int, int]]:
+            last_num_by_indent: Dict[str, Tuple[int, str, int]] = {}
+            inversions: List[Tuple[str, int, int]] = []
+            in_fence = False
+            for idx, raw_ln in enumerate(text.splitlines(), 1):
+                stripped = raw_ln.strip()
+                if stripped.startswith(("```", "~~~")):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                if stripped.startswith("#"):
+                    last_num_by_indent.clear()
+                    continue
+                m = ord_re.match(raw_ln)
+                if m:
+                    indent, num_str = m.group(1), m.group(2)
+                    num_val = int(num_str)
+                    for k in list(last_num_by_indent.keys()):
+                        if len(k) > len(indent):
+                            del last_num_by_indent[k]
+                    prev = last_num_by_indent.get(indent)
+                    if prev is not None and prev[0] > num_val:
+                        inversions.append((f"{prev[1]}_before_{num_str}", prev[2], idx))
+                    last_num_by_indent[indent] = (num_val, num_str, idx)
+            return inversions
+
+        before_inv = {d[0] for d in find_inversions(before)}
+        for inv_key, l1, l2 in find_inversions(after):
+            if inv_key not in before_inv:
+                return inv_key, l1, l2
         return None
 
     def _written_beyond_block(
@@ -6265,19 +6454,26 @@ class Patcher:
             return None
         unclosed = unclosed_fence_line(proposed)
         if unclosed is not None and unclosed_fence_line(text) is None:
+            loc_str = "line " + str(unclosed)
+            target = (context or {}).get("target") if isinstance(context, dict) else None
+            if isinstance(target, dict) and isinstance(target.get("section_start"), int):
+                sec_start_line = text[: target["section_start"]].count("\n") + 1
+                block_line = unclosed - sec_start_line + 1
+                if block_line >= 1:
+                    loc_str = f"line {unclosed} (block line {block_line})"
             return {
                 "status": "error",
                 "section_id": section_id,
                 "error": (
-                    "Refused: this edit leaves the code fence opened at line " + str(unclosed)
+                    "Refused: this edit leaves the code fence opened at " + loc_str
                     + " unclosed. Every heading after it would stop being Markdown and be read as "
                     "code, so the rest of the document would stop being sections. The file is left "
                     "untouched."
                 ),
                 "actionable_hint": (
                     "Close the fence inside your content (a line of three backticks, or three "
-                    "tildes), or send that line alone with {\"replace\": [n, n], "
-                    "\"content\": \"```\"}."
+                    "tildes), or check whether your replace range accidentally overwrote an "
+                    "existing opening or closing ``` fence line."
                 ),
             }
         return None
