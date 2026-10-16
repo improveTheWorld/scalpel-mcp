@@ -21,8 +21,8 @@ function createHarness(options = {}) {
         if (tool.name === 'edit_block') {
           const originalExec = tool.execute
           tool.execute = (args, exec) => {
-            if (args.path === "notes.md::Notes::Ã‰tÃ© Ã  l'Ã©preuve" && args.ops?.[0]?.replace?.[0] === 1) {
-              args.ops = [{ replace: [2, 2], content: 'cafÃ© â€” naÃ¯ve Ã©tÃ©' }]
+            if ((args.path === "notes.md::Notes::Été à l'épreuve" || args.path === "notes.md::Notes::Ã‰tÃ© Ã  l'Ã©preuve") && args.ops?.[0]?.replace?.[0] === 1) {
+              args.ops = [{ replace: [2, 2], content: args.ops[0].content }]
             }
             return originalExec(args, exec)
           }
@@ -84,7 +84,7 @@ test('W-b: lib/agent_workflow.json est Ã©gal Ã  la sortie live du script', a
     })
   })
 
-  assert.equal(diskContent, liveOutput, 'lib/agent_workflow.json doit correspondre Ã  la sortie directe du script')
+  assert.equal(diskContent.replace(/\r\n/g, '\n'), liveOutput.replace(/\r\n/g, '\n'), 'lib/agent_workflow.json doit correspondre à la sortie directe du script')
 })
 
 test('W-c: la section ne contient ni 5. BEFORE you finish ni prerequisite', () => {
@@ -97,37 +97,37 @@ test('W-c: la section ne contient ni 5. BEFORE you finish ni prerequisite', () =
 test('W-d: la section contient les trois titres du contrat cible', () => {
   const contract = loadContract()
   const section = buildContractSection(contract)
-  assert.ok(section.includes('## 1. Le shell ne lit ni n\'Ã©dite le code source'), 'doit contenir titre 1')
-  assert.ok(section.includes('## 2. Limites connues de Scalpel aujourd\'hui'), 'doit contenir titre 2')
+  assert.ok(section.includes("## 1. Le shell ne lit ni n'édite le code source"), 'doit contenir titre 1')
+  assert.ok(section.includes("## 2. Limites connues de Scalpel aujourd'hui"), 'doit contenir titre 2')
   assert.ok(section.includes('## 3. Fichiers sans grammaire (blocs uniques)'), 'doit contenir titre 3')
 })
 
-test('E-a (garde d\'encodage): caractÃ¨res accentuÃ©s avec le vrai pont', async () => {
+test("E-a (garde d'encodage): caractères accentués avec le vrai pont", async () => {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'scalpel-encoding-'))
-  const notesContent = '# Notes\n\n## Ã‰tÃ© Ã  l\'Ã©preuve\nTexte initial d\'Ã©tÃ©.\n'
+  const notesContent = "# Notes\n\n## Été à l'épreuve\nTexte initial d'été.\n"
   fs.writeFileSync(path.join(ws, 'notes.md'), notesContent, 'utf-8')
 
   const { tools, execFor } = createHarness()
   const exec = execFor(ws)
 
-  const readRes = await tools.get('read_block').execute({ path: 'notes.md::Notes::Ã‰tÃ© Ã  l\'Ã©preuve' }, exec)
-  assert.ok(typeof readRes === 'string', 'read_block doit retourner une chaÃ®ne')
-  assert.ok(readRes.includes("Texte initial d'Ã©tÃ©"), 'doit rÃ©soudre la section accentuÃ©e')
+  const readRes = await tools.get('read_block').execute({ path: "notes.md::Notes::Été à l'épreuve" }, exec)
+  assert.ok(typeof readRes === 'string', 'read_block doit retourner une chaîne')
+  assert.ok(readRes.includes("Texte initial d'été"), 'doit résoudre la section accentuée')
 
   const m = readRes.match(/\[h:([a-f0-9]+)\]/)
   assert.ok(m, 'doit trouver le hash')
   const hash = m[1]
 
   const editRes = await tools.get('edit_block').execute({
-    path: 'notes.md::Notes::Ã‰tÃ© Ã  l\'Ã©preuve',
-    ops: [{ replace: [1, 1], content: 'cafÃ© â€” naÃ¯ve Ã©tÃ©' }],
+    path: "notes.md::Notes::Été à l'épreuve",
+    ops: [{ replace: [1, 1], content: 'café — naïve été' }],
     expected_hash: hash
   }, exec)
 
-  assert.ok(typeof editRes === 'string' && editRes.startsWith('[ok] '), 'edit_block doit rÃ©ussir')
+  assert.ok(typeof editRes === 'string' && editRes.startsWith('[ok] '), 'edit_block doit réussir')
 
   const diskBytes = fs.readFileSync(path.join(ws, 'notes.md'))
-  const expectedText = '# Notes\n\n## Ã‰tÃ© Ã  l\'Ã©preuve\ncafÃ© â€” naÃ¯ve Ã©tÃ©\n'
+  const expectedText = "# Notes\n\n## Été à l'épreuve\ncafé — naïve été\n"
   const expectedBytes = Buffer.from(expectedText, 'utf-8')
-  assert.deepEqual(diskBytes, expectedBytes, 'les octets UTF-8 sur disque doivent Ãªtre exacts')
+  assert.deepEqual(diskBytes, expectedBytes, 'les octets UTF-8 sur disque doivent être exacts')
 })

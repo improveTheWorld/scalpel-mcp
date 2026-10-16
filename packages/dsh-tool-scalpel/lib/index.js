@@ -1,4 +1,4 @@
-import { executeScalpel, callScalpelTool } from './bridge.js'
+import { executeScalpel, callScalpelTool, closeDaemon } from './bridge.js'
 import { randomUUID } from 'node:crypto'
 import { createFallback, safeGet } from './fallback.js'
 
@@ -7,6 +7,7 @@ import path from 'node:path'
 import {
   CONTRACT_SECTION_NAME,
   TOOLSET_KEY,
+  buildAgenticOsReportingSection,
   buildContractSection,
   loadContract,
   resolveMode,
@@ -34,7 +35,7 @@ export const DSH_EXTENSIONS = {
     properties: {
       content: {
         type: 'string',
-        description: 'Contenu initial du fichier à créer (uniquement lorsque parent est un dossier)'
+        description: 'Corps du nouveau bloc lorsque son titre ou nom de fichier est fourni séparément dans text (préservé octet par octet, saut de ligne final inclus).'
       },
       ...ESCALATION_FIELDS
     }
@@ -113,6 +114,13 @@ function syncRestriction(agent, wantScalpel) {
 export function apply(ctx, config, options = {}) {
   const scalpelExec = options.executeScalpel || executeScalpel
   const callTool = options.callTool || options.executeScalpel || callScalpelTool
+  try {
+    if (ctx && 'on' in ctx && typeof ctx.on === 'function') {
+      ctx.on('dispose', () => {
+        try { closeDaemon() } catch {}
+      })
+    }
+  } catch {}
   const fallback = createFallback({
     getMode: () => (config?.unindexedFallback === 'off' ? 'off' : 'on'),
     executeScalpel: scalpelExec,
@@ -179,7 +187,10 @@ export function apply(ctx, config, options = {}) {
         const session = assembleCtx?.agent?.session
         if (!session) return ''
         resyncAgent(assembleCtx?.agent)
-        if (readModes(session).mode !== 'scalpel') return ''
+        const { mode } = readModes(session)
+        if (mode !== 'scalpel') {
+          return buildAgenticOsReportingSection(mode)
+        }
         const contract = loadContract()
         if (contract.error) ctx.logger?.warn?.('[toolset] contrat illisible: %s', contract.error)
         return buildContractSection(contract)
@@ -201,21 +212,28 @@ export function apply(ctx, config, options = {}) {
     })
   })
 
-    function isWholeFileOrUnresolvedError(resOrErr) {
+    function isWholeFileOrUnresolvedError(resOrErr, targetPath) {
+      if (typeof targetPath === 'string' && (targetPath.includes('::') || targetPath.includes('#'))) {
+        return false
+      }
       if (!resOrErr) return false
       const msg = typeof resOrErr === 'string'
         ? resOrErr
         : (resOrErr.error || resOrErr.message || JSON.stringify(resOrErr))
       if (typeof msg !== 'string') return false
       const lower = msg.toLowerCase()
-      return (
+      if (
         lower.includes('whole code file') ||
+        lower.includes('no symbol or markdown section has this identifier')
+      ) {
+        return false
+      }
+      return (
         lower.includes('whole file') ||
         lower.includes('nothing inside it is a block') ||
         lower.includes('recognised no container') ||
-        lower.includes('unresolved') ||
-        lower.includes('no symbol or markdown section has this identifier') ||
-        lower.includes('outside the workspace root')
+        lower.includes('outside the workspace root') ||
+        lower.includes('resolves outside the workspace root')
       )
     }
   // 1. Enregistrement des 8 outils Scalpel universels depuis agent_schemas.json
@@ -260,10 +278,33 @@ export function apply(ctx, config, options = {}) {
               targets.push(args.path.split('::')[0].split('#')[0])
             }
           } else if (name === 'insert_block') {
-            if (args?.content !== undefined && args?.content !== null) {
-              targets.push(path.resolve(ws, args.parent || '.', args.text || ''))
-            } else if (typeof args?.parent === 'string' && args.parent.trim()) {
-              targets.push(args.parent.split('::')[0].split('#')[0])
+            const pushInsertTarget = (parentVal, textVal, contentVal) => {
+              if (typeof parentVal !== 'string' || !parentVal.trim()) return
+              if (contentVal !== undefined && contentVal !== null) {
+                const resolvedParent = path.resolve(ws, parentVal)
+                let isDir = false
+                try {
+                  isDir = fs.statSync(resolvedParent).isDirectory()
+                } catch {}
+                if (isDir && typeof textVal === 'string' && textVal.trim() && !textVal.includes('\n') && !textVal.includes('\r')) {
+                  targets.push(path.resolve(ws, parentVal, textVal))
+                } else {
+                  targets.push(parentVal.split('::')[0].split('#')[0])
+                }
+              } else {
+                targets.push(parentVal.split('::')[0].split('#')[0])
+              }
+            }
+            if (Array.isArray(args?.inserts)) {
+              for (const entry of args.inserts) {
+                const p = entry?.parent || args?.parent
+                pushInsertTarget(p, entry?.text, entry?.content)
+              }
+              if (targets.length === 0 && typeof args?.parent === 'string' && args.parent.trim()) {
+                pushInsertTarget(args.parent, args.text, args.content)
+              }
+            } else {
+              pushInsertTarget(args?.parent, args?.text, args?.content)
             }
           } else if (name === 'delete_block') {
             if (typeof args?.path === 'string' && args.path.trim()) {
@@ -285,28 +326,11 @@ export function apply(ctx, config, options = {}) {
         const { sandbox_permissions, justification, ...scalpelArgs } = args || {}
 
         if (name === 'insert_block') {
-          const { parent, anchor, text, content } = scalpelArgs
+          const { content } = scalpelArgs
           if (content !== undefined && content !== null) {
             if (typeof content !== 'string') {
               throw new Error("L'argument 'content' doit être une chaîne de caractères.")
             }
-            if (typeof text !== 'string' || text.includes('\n') || text.includes('\r')) {
-              throw new Error("Lorsque 'content' est fourni, 'text' doit être le nom du fichier seul (sans saut de ligne).")
-            }
-            const resolvedParent = path.resolve(ws, parent || '.')
-            let isDir = false
-            try {
-              const st = fs.statSync(resolvedParent)
-              isDir = st.isDirectory()
-            } catch {
-              isDir = false
-            }
-            if (!isDir) {
-              throw new Error(`Lorsque 'content' est fourni, 'parent' doit être un dossier existant ("${parent}" n'est pas un dossier).`)
-            }
-            const payloadText = `${text}\n${content}`
-            const res = await callTool(ws, 'insert_block', { parent, anchor, text: payloadText })
-            return fallback.hintForText(res)
           }
           const res = await callTool(ws, 'insert_block', scalpelArgs)
           return fallback.hintForText(res)
@@ -318,12 +342,12 @@ export function apply(ctx, config, options = {}) {
           let caughtError = null
           try {
             res = await callTool(ws, 'edit_block', scalpelArgs)
-            if (isWholeFileOrUnresolvedError(res)) {
+            if (isWholeFileOrUnresolvedError(res, scalpelArgs?.path)) {
               callToolFailed = true
             }
           } catch (err) {
             caughtError = err
-            if (isWholeFileOrUnresolvedError(err)) {
+            if (isWholeFileOrUnresolvedError(err, scalpelArgs?.path)) {
               callToolFailed = true
             } else {
               throw err
@@ -331,8 +355,12 @@ export function apply(ctx, config, options = {}) {
           }
 
           if (callToolFailed) {
-            if (typeof scalpelArgs?.path === 'string') {
-              const rawTarget = scalpelArgs.path.split('::')[0].split('#')[0]
+            if (
+              typeof scalpelArgs?.path === 'string' &&
+              !scalpelArgs.path.includes('::') &&
+              !scalpelArgs.path.includes('#')
+            ) {
+              const rawTarget = scalpelArgs.path
               const absPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(ws, rawTarget)
               let isFile = false
               try {
@@ -349,11 +377,16 @@ export function apply(ctx, config, options = {}) {
             } else if (Array.isArray(scalpelArgs?.edits) && scalpelArgs.edits.length > 0) {
               const resolvedEntries = []
               for (const entry of scalpelArgs.edits) {
-                if (!entry || typeof entry.path !== 'string') {
+                if (
+                  !entry ||
+                  typeof entry.path !== 'string' ||
+                  entry.path.includes('::') ||
+                  entry.path.includes('#')
+                ) {
                   resolvedEntries.length = 0
                   break
                 }
-                const rawTarget = entry.path.split('::')[0].split('#')[0]
+                const rawTarget = entry.path
                 const absPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(ws, rawTarget)
                 let isFile = false
                 try {
@@ -386,20 +419,25 @@ export function apply(ctx, config, options = {}) {
           let caughtError = null
           try {
             res = await callTool(ws, 'delete_block', scalpelArgs)
-            if (isWholeFileOrUnresolvedError(res)) {
+            if (isWholeFileOrUnresolvedError(res, scalpelArgs?.path)) {
               callToolFailed = true
             }
           } catch (err) {
             caughtError = err
-            if (isWholeFileOrUnresolvedError(err)) {
+            if (isWholeFileOrUnresolvedError(err, scalpelArgs?.path)) {
               callToolFailed = true
             } else {
               throw err
             }
           }
 
-          if (callToolFailed && typeof scalpelArgs?.path === 'string') {
-            const rawTarget = scalpelArgs.path.split('::')[0].split('#')[0]
+          if (
+            callToolFailed &&
+            typeof scalpelArgs?.path === 'string' &&
+            !scalpelArgs.path.includes('::') &&
+            !scalpelArgs.path.includes('#')
+          ) {
+            const rawTarget = scalpelArgs.path
             const absPath = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(ws, rawTarget)
             let isFile = false
             try {
@@ -424,7 +462,7 @@ export function apply(ctx, config, options = {}) {
           let caughtError = null
           try {
             res = await callTool(ws, 'read_block', scalpelArgs)
-            const msg = typeof res === 'string' ? res : (res?.error || '')
+            const msg = typeof res === 'string' ? res : (res?.error || JSON.stringify(res || ''))
             if (msg.includes('outside the workspace root') || msg.includes('resolves outside the workspace root')) {
               outsideRoot = true
             }
@@ -438,36 +476,73 @@ export function apply(ctx, config, options = {}) {
             }
           }
 
-          if (outsideRoot && typeof scalpelArgs?.path === 'string') {
-            const absPath = path.resolve(ws, scalpelArgs.path)
+          const formatOutsideFile = (cryptoMod, p, fmt) => {
+            if (typeof p !== 'string' || p.includes('::') || p.includes('#')) return null
+            const absPath = path.resolve(ws, p)
             let isFile = false
             try {
               isFile = fs.statSync(absPath).isFile()
             } catch {}
-            if (isFile) {
-              const cryptoMod = await import('node:crypto')
-              const buf = fs.readFileSync(absPath)
-              const hash = cryptoMod.createHash('sha256').update(buf).digest('hex').slice(0, 8)
-              const hasBOM = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF
-              const text = hasBOM ? buf.subarray(3).toString('utf8') : buf.toString('utf8')
-              let raw = text
-              if (raw.endsWith('\r\n')) raw = raw.slice(0, -2)
-              else if (raw.endsWith('\n') || raw.endsWith('\r')) raw = raw.slice(0, -1)
-              const lines = raw === '' ? [] : raw.split(/\r?\n/)
-              const width = String(Math.max(1, lines.length)).length
-              const numbered = lines.map((l, i) => `${String(i + 1).padStart(width, ' ')} | ${l}`).join('\n')
-              const header = `${absPath} [file_text] [h:${hash}] (${lines.length} lines)`
-              if (scalpelArgs.format === 'json') {
-                return {
-                  status: 'success',
-                  id: absPath,
-                  kind: 'file_text',
-                  content_hash: hash,
-                  line_count: lines.length,
-                  numbered_text: `${header}\n${numbered}`
+            if (!isFile) return null
+            const buf = fs.readFileSync(absPath)
+            const hasBOM = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF
+            const text = hasBOM ? buf.subarray(3).toString('utf8') : buf.toString('utf8')
+            const hash = cryptoMod.createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex').slice(0, 8)
+            let raw = text
+            if (raw.endsWith('\r\n')) raw = raw.slice(0, -2)
+            else if (raw.endsWith('\n') || raw.endsWith('\r')) raw = raw.slice(0, -1)
+            const lines = raw === '' ? [] : raw.split(/\r?\n/)
+            const width = String(Math.max(1, lines.length)).length
+            const numbered = lines.map((l, i) => `${String(i + 1).padStart(width, ' ')} | ${l}`).join('\n')
+            const header = `${absPath} [file_text] [h:${hash}] (${lines.length} lines)`
+            if (fmt === 'json') {
+              return {
+                status: 'success',
+                id: absPath,
+                kind: 'file_text',
+                content_hash: hash,
+                line_count: lines.length,
+                numbered_text: `${header}\n${numbered}`
+              }
+            }
+            return `${header}\n${numbered}`
+          }
+
+          if (outsideRoot && typeof scalpelArgs?.path === 'string') {
+            const cryptoMod = await import('node:crypto')
+            const formatted = formatOutsideFile(cryptoMod, scalpelArgs.path, scalpelArgs.format)
+            if (formatted !== null) {
+              return formatted
+            }
+          } else if (outsideRoot && Array.isArray(scalpelArgs?.paths) && scalpelArgs.paths.length > 0) {
+            const cryptoMod = await import('node:crypto')
+            const rendered = []
+            let anyResolved = false
+            for (const onePath of scalpelArgs.paths) {
+              const formatted = formatOutsideFile(cryptoMod, onePath, scalpelArgs.format)
+              if (formatted !== null) {
+                anyResolved = true
+                rendered.push(formatted)
+              } else {
+                try {
+                  const singleRes = await callTool(ws, 'read_block', { path: onePath, format: scalpelArgs.format })
+                  rendered.push(singleRes)
+                } catch (err) {
+                  if (scalpelArgs.format === 'json') {
+                    rendered.push({ status: 'error', id: onePath, error: err.message || String(err) })
+                  } else {
+                    rendered.push(`[error] ${onePath}: ${err.message || String(err)}`)
+                  }
                 }
               }
-              return `${header}\n${numbered}`
+            }
+            if (anyResolved) {
+              if (scalpelArgs.format === 'json') {
+                return {
+                  blocks: rendered.map(b => typeof b === 'object' ? b : { status: 'success', text: b })
+                }
+              }
+              return rendered.map(b => typeof b === 'string' ? b : JSON.stringify(b)).join('\n\n')
             }
           }
 
@@ -480,10 +555,10 @@ export function apply(ctx, config, options = {}) {
     })
   }
 
-  // 1b. Enregistrement de l'outil d'évaluation unifié scalpel_report
+  // 1b. Enregistrement de l'outil d'évaluation unifié scalpel_report (Scalpel & AI Agentic OS)
   ctx.tools.register({
     name: 'scalpel_report',
-    description: "Enregistre un bilan d'évaluation consolidé de l'outil Scalpel pour cette session. Capture automatiquement l'empreinte technique (version du preset, commit Git, modèle, plateforme, ID de session) et consigne les blocages, refus inattendus, réussites et données nécessaires pour reproduire les anomalies dans le dossier unifié reports/bilans_scalpel/.",
+    description: "Enregistre un bilan d'évaluation consolidé de l'outil Scalpel et de l'expérience d'utilisation de l'AI Agentic OS pour cette session. Capture automatiquement l'empreinte technique (version du preset, commit Git, modèle, plateforme, ID de session) et consigne ton avis sur l'AI Agentic OS, les blocages, refus inattendus, réussites, souhaits d'amélioration et données nécessaires pour reproduire les anomalies dans le dossier unifié reports/bilans_scalpel/.",
     parameters: {
       type: 'object',
       properties: {
@@ -494,25 +569,29 @@ export function apply(ctx, config, options = {}) {
         verdict: {
           type: 'string',
           enum: ['success', 'partial', 'blocked', 'failed'],
-          description: "Verdict global sur le fonctionnement de Scalpel pour cette tâche (success, partial, blocked, failed)."
+          description: "Verdict global sur le fonctionnement de Scalpel et de l'AI Agentic OS pour cette tâche (success, partial, blocked, failed)."
         },
         summary: {
           type: 'string',
-          description: "Résumé concis de l'évaluation, des points clés et du comportement observé."
+          description: "Résumé concis de l'évaluation, des points clés et du comportement observé (Scalpel & AI Agentic OS)."
+        },
+        ai_os_experience: {
+          type: 'string',
+          description: "Avis détaillé sur l'expérience d'utilisation de l'AI Agentic OS et de ses mécanismes (capsules d'experts, expert_wakeup, expert_push_forward, expert_ask, expert_ticket, expert_board, expert_mitosis, compaction, sous-agents, ergonomie du harnais)."
         },
         tool_call_counts: {
           type: 'object',
-          description: "Comptes d'appels par outil Scalpel (ex: { read_block: 5, edit_block: 2 })."
+          description: "Comptes d'appels par outil Scalpel ou AI Agentic OS (ex: { read_block: 5, edit_block: 2, expert_push_forward: 1 })."
         },
         blockages_and_refusals: {
           type: 'array',
-          description: "Liste des blocages, refus inattendus ou erreurs rencontrés avec les outils Scalpel.",
+          description: "Liste des blocages, refus inattendus, bugs ou erreurs rencontrés avec les outils Scalpel ou l'AI Agentic OS.",
           items: {
             type: 'object',
             properties: {
-              tool: { type: 'string', description: "Nom de l'outil (read_block, edit_block, etc.)." },
-              target: { type: 'string', description: "Cible (chemin de fichier ou symbole)." },
-              nature: { type: 'string', description: "Nature du problème (refus_inattendu, conflit_hash, erreur_parse, hors_racine, etc.)." },
+              tool: { type: 'string', description: "Nom de l'outil ou mécanisme (read_block, edit_block, expert_push_forward, etc.)." },
+              target: { type: 'string', description: "Cible (chemin de fichier, symbole ou identifiant d'expert)." },
+              nature: { type: 'string', description: "Nature du problème (refus_inattendu, conflit_hash, erreur_parse, hors_racine, ergonomie_ai_os, etc.)." },
               error_message: { type: 'string', description: "Message d'erreur ou de refus exact renvoyé par l'outil." },
               context_call: { description: "Arguments passés lors de l'appel." },
               workaround: { type: 'string', description: "Contournement utilisé ou indication du blocage." }
@@ -539,12 +618,19 @@ export function apply(ctx, config, options = {}) {
         },
         successes: {
           type: 'array',
-          description: "Points forts et réussites constatés lors de la session.",
+          description: "Points forts et réussites constatés lors de la session (Scalpel & AI Agentic OS).",
           items: { type: 'string' }
         },
         recommendations: {
           type: 'string',
-          description: "Recommandations et axes d'amélioration pour Scalpel."
+          description: "Recommandations et axes d'amélioration pour Scalpel et l'AI Agentic OS."
+        },
+        improvement_wishes: {
+          oneOf: [
+            { type: 'array', items: { type: 'string' } },
+            { type: 'string' }
+          ],
+          description: "Souhaits d'amélioration et propositions d'évolution pour Scalpel et l'AI Agentic OS."
         }
       },
       required: ['task_objective', 'verdict', 'summary']
@@ -556,7 +642,13 @@ export function apply(ctx, config, options = {}) {
     async execute(args, exec) {
       const { saveScalpelReport } = await import('./report.js')
       const ws = getSessionWorkspace(exec)
-      const res = saveScalpelReport(args, { exec, workspace: ws })
+      const projections = safeGet(ctx, 'sessionProjections')
+      let presetId = null
+      try {
+        const session = exec?.agent?.session
+        if (session) presetId = projections?.stateOf(session, 'agentPreset') ?? null
+      } catch {}
+      const res = saveScalpelReport(args, { exec, workspace: ws, projections, ...(presetId ? { presetId } : {}) })
       return {
         status: 'success',
         message: `Bilan Scalpel consolidé enregistré avec succès dans ${res.mdPath}`,

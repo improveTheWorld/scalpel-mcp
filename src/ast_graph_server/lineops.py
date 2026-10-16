@@ -314,7 +314,8 @@ def format_batch_edit_result(res: Dict[str, Any]) -> str:
     refused = res.get("refused", 0)
     results = res.get("results") or []
     total = len(results)
-    status_str = f"[ok] applied {applied}/{total} edits"
+    prefix = "[refused]" if (applied == 0 and refused > 0) else "[ok]"
+    status_str = f"{prefix} applied {applied}/{total} edits"
     if refused:
         status_str += f" ({refused} refused)"
     status_str += ":"

@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { executeScalpel } from '../lib/bridge.js';
 
+const SCALPEL_MCP_ROOT = path.resolve(import.meta.dirname, '../../..');
+
 test('1. Outline d\'un fichier de test pur (delete_unindexed.test.mjs) retourne ses tests', async () => {
-  const ws = process.cwd();
+  const ws = SCALPEL_MCP_ROOT;
   const filePath = 'packages/dsh-tool-scalpel/test/delete_unindexed.test.mjs';
 
   const res = await executeScalpel(ws, 'read_block', { path: filePath, format: 'json' });
@@ -26,7 +29,7 @@ test('1. Outline d\'un fichier de test pur (delete_unindexed.test.mjs) retourne 
 });
 
 test('2. read_block sur un test spécifique renvoie le corps exact et le hash', async () => {
-  const ws = process.cwd();
+  const ws = SCALPEL_MCP_ROOT;
   const testId = 'packages/dsh-tool-scalpel/test/delete_unindexed.test.mjs::Lot D - delete_unindexed refuse si le fichier est indexe';
 
   const res = await executeScalpel(ws, 'read_block', { path: testId, format: 'json' });
@@ -37,7 +40,7 @@ test('2. read_block sur un test spécifique renvoie le corps exact et le hash', 
 });
 
 test('3. edit_block permet de modifier un test individuellement avec son expected_hash', async () => {
-  const ws = process.cwd();
+  const ws = SCALPEL_MCP_ROOT;
   const testId = 'packages/dsh-tool-scalpel/test/delete_unindexed.test.mjs::Lot D - delete_unindexed refuse si le fichier est indexe';
 
   // 1. Lire le bloc de test
@@ -79,7 +82,7 @@ test('3. edit_block permet de modifier un test individuellement avec son expecte
 });
 
 test('4. Closures imbriquées dans fallback.js adressables individuellement', async () => {
-  const ws = process.cwd();
+  const ws = SCALPEL_MCP_ROOT;
   const innerId = 'packages/dsh-tool-scalpel/lib/fallback.js::createFallback::checkEligibility';
 
   const res = await executeScalpel(ws, 'read_block', { path: innerId, format: 'json' });

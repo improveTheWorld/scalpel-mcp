@@ -1,9 +1,10 @@
-﻿import { spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 export const PYTHON_PATH = process.env.PYTHON_PATH || 'python'
+import fs from 'node:fs'
 export const SCALPEL_ROOT = process.env.SCALPEL_ROOT || resolve(__dirname, '../../..')
 export const RUNNER_PY = resolve(__dirname, 'runner.py')
 
@@ -19,6 +20,56 @@ let nextReqId = 1
 const pendingRequests = new Map()
 
 let daemonListening = false
+let daemonCodeSignature = null
+let cachedSig = null
+let cachedSigAt = 0
+
+function computePythonCodeSignature() {
+  const now = Date.now()
+  if (cachedSig !== null && now - cachedSigAt < 1000) {
+    try {
+      const runnerSt = fs.statSync(RUNNER_PY)
+      const runnerMtime = Math.round(runnerSt.mtimeMs)
+      if (cachedSig.includes(`:${runnerMtime}:`)) {
+        return cachedSig
+      }
+    } catch {}
+  }
+  try {
+    const srcDir = resolve(SCALPEL_ROOT, 'src', 'ast_graph_server')
+    let maxMtime = 0
+    let count = 0
+    const runnerSt = fs.statSync(RUNNER_PY)
+    const runnerMtime = Math.round(runnerSt.mtimeMs)
+    maxMtime = Math.max(maxMtime, runnerMtime)
+    const walk = (dir) => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (ent.name === '__pycache__') continue
+        const full = resolve(dir, ent.name)
+        if (ent.isDirectory()) {
+          walk(full)
+        } else if (ent.name.endsWith('.py')) {
+          const st = fs.statSync(full)
+          if (st.mtimeMs > maxMtime) maxMtime = st.mtimeMs
+          count++
+        }
+      }
+    }
+    if (fs.existsSync(srcDir)) walk(srcDir)
+    let version = ''
+    try {
+      const initFile = resolve(srcDir, '__init__.py')
+      if (fs.existsSync(initFile)) {
+        version = fs.readFileSync(initFile, 'utf8').trim()
+      }
+    } catch {}
+    cachedSig = `${version}:${count}:${runnerMtime}:${Math.round(maxMtime)}`
+    cachedSigAt = now
+    return cachedSig
+  } catch {
+    return null
+  }
+}
 
 function onDaemonStdoutData(chunk) {
   daemonBuffer += chunk.toString('utf8')
@@ -84,6 +135,7 @@ export function closeDaemon() {
   daemonProc = null
   daemonBuffer = ''
   daemonStderr = ''
+  daemonCodeSignature = null
   if (proc) {
     setDaemonRefState(proc, false)
     try { proc.kill() } catch {}
@@ -115,13 +167,24 @@ function handleDaemonLine(line) {
   }
 }
 
-function ensureDaemon() {
+export function ensureDaemon() {
   if (daemonProc && !daemonProc.killed && daemonProc.exitCode === null) {
-    return daemonProc
+    if (pendingRequests.size === 0) {
+      const currentSig = computePythonCodeSignature()
+      if (currentSig && daemonCodeSignature && currentSig !== daemonCodeSignature) {
+        closeDaemon()
+      } else {
+        return daemonProc
+      }
+    } else {
+      return daemonProc
+    }
   }
+  const currentSig = computePythonCodeSignature()
   daemonBuffer = ''
   daemonStderr = ''
   daemonListening = false
+  daemonCodeSignature = currentSig
   const proc = spawn(PYTHON_PATH, [RUNNER_PY, '--daemon'], {
     cwd: SCALPEL_ROOT,
     windowsHide: true,
@@ -136,21 +199,19 @@ function ensureDaemon() {
   setDaemonRefState(proc, pendingRequests.size > 0)
 
   proc.on('error', (err) => {
-    if (daemonProc === proc) {
-      daemonProc = null
-      daemonListening = false
-    }
+    if (daemonProc !== proc) return
+    daemonProc = null
+    daemonListening = false
     rejectAllPending(() => new Error('Scalpel bridge: echec du processus Python (' + PYTHON_PATH + '): ' + err.message))
   })
 
   proc.on('close', (code) => {
+    if (daemonProc !== proc) return
     const errText = daemonStderr
-    if (daemonProc === proc) {
-      daemonProc = null
-      daemonListening = false
-      daemonBuffer = ''
-      daemonStderr = ''
-    }
+    daemonProc = null
+    daemonListening = false
+    daemonBuffer = ''
+    daemonStderr = ''
     if (pendingRequests.size > 0) {
       rejectAllPending(() => new Error('Scalpel bridge error (code ' + code + '): ' + errText))
     }

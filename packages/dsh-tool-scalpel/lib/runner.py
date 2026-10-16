@@ -25,7 +25,7 @@ def _plain_tool_error(name: str, exc: Exception, accepted: list) -> str:
         return (
             name + " failed INSIDE the tool -- this is NOT a parameter problem, your arguments "
             "were accepted. Retry the same call once; if it fails again, reach the same block "
-            "another way (read the whole file, or find it with search_documents)."
+            "another way (e.g. read_block on the parent file or directory)."
         )
     if "validation error for" in text:
         named = sorted({key for key in accepted if re.search(r"\b" + re.escape(key) + r"\b", text)})
@@ -60,6 +60,28 @@ def dispatch_command(server, cfg, tool_schemas, cmd: str, args: dict, mtime_cach
     if not isinstance(args, dict):
         args = {}
 
+    for list_key in ("ops", "edits", "inserts", "paths"):
+        raw_val = args.get(list_key)
+        if isinstance(raw_val, str):
+            try:
+                parsed_val = json.loads(raw_val)
+                if isinstance(parsed_val, list):
+                    args[list_key] = parsed_val
+            except Exception:
+                pass
+        if list_key in ("edits", "inserts") and isinstance(args.get(list_key), list):
+            norm_entries = []
+            for entry in args[list_key]:
+                if isinstance(entry, str):
+                    try:
+                        parsed_entry = json.loads(entry)
+                        norm_entries.append(parsed_entry if isinstance(parsed_entry, dict) else entry)
+                    except Exception:
+                        norm_entries.append(entry)
+                else:
+                    norm_entries.append(entry)
+            args[list_key] = norm_entries
+
     mutated_abs_paths = []
     if cmd in ("read_block", "edit_block", "insert_block", "delete_block"):
         candidates = []
@@ -79,7 +101,13 @@ def dispatch_command(server, cfg, tool_schemas, cmd: str, args: dict, mtime_cach
                     val = entry.get("path")
                     if isinstance(val, str) and val.strip():
                         candidates.append(val)
-
+        inserts_val = args.get("inserts")
+        if isinstance(inserts_val, list):
+            for entry in inserts_val:
+                if isinstance(entry, dict):
+                    val = entry.get("parent") or entry.get("parent_id") or entry.get("path")
+                    if isinstance(val, str) and val.strip():
+                        candidates.append(val)
         server.indexer._ensure_hashes_loaded()
         for cand in candidates:
             clean_path = cand.split("::")[0].split("#")[0].strip()
@@ -118,9 +146,16 @@ def dispatch_command(server, cfg, tool_schemas, cmd: str, args: dict, mtime_cach
             args["ops"] = _normalize_edit_ops(args["ops"])
         if "edits" in args and isinstance(args.get("edits"), list):
             for entry in args["edits"]:
-                if isinstance(entry, dict) and isinstance(entry.get("ops"), list):
-                    entry["ops"] = _normalize_edit_ops(entry["ops"])
-
+                if isinstance(entry, dict):
+                    if isinstance(entry.get("ops"), str):
+                        try:
+                            parsed_ops = json.loads(entry["ops"])
+                            if isinstance(parsed_ops, list):
+                                entry["ops"] = parsed_ops
+                        except Exception:
+                            pass
+                    if isinstance(entry.get("ops"), list):
+                        entry["ops"] = _normalize_edit_ops(entry["ops"])
     if cmd in tool_schemas:
         schema = tool_schemas[cmd]
         parameters = schema.get("parameters") or {}

@@ -410,7 +410,7 @@ class Patcher:
         abs_path, text, _newline, error = self._resolve_markdown(document_id)
         if error:
             return None
-        layout = markdown_layout(text)
+        layout = self._get_markdown_layout(abs_path, text.encode("utf-8"), text)
         if not layout:
             return None
         for identifier, item in zip(self._layout_ids(document_id, layout), layout):
@@ -1556,7 +1556,10 @@ class Patcher:
         """
         decomposed = unicodedata.normalize("NFKD", text or "")
         ascii_text = decomposed.encode("ascii", "ignore").decode("ascii").lower()
-        return re.sub(r"[^a-z0-9]+", " ", ascii_text).strip()
+        folded = re.sub(r"[^a-z0-9]+", " ", ascii_text).strip()
+        if not folded and (text or "").strip():
+            return (text or "").strip()
+        return folded
 
     @classmethod
     def _folded_chain(cls, parts: List[str]) -> str:
@@ -1714,7 +1717,7 @@ class Patcher:
         _abs_path, text, _newline, error = self._resolve_markdown(document_id)
         if error:
             return {"file_part": document_id, "candidates": []}
-        layout = markdown_layout(text)
+        layout = self._get_markdown_layout(_abs_path, text.encode("utf-8"), text)
         identifiers = self._layout_ids(document_id, layout)
         labels = self._section_labels(layout)
         chains = self._section_chains(layout, labels)
@@ -1729,8 +1732,11 @@ class Patcher:
         # printed tree writes it from the top. Both are the same paragraph.
         matches = [
             index for index, chain in enumerate(chains)
-            if chain and (self._folded_chain(chain) == wanted
-                          or (len(chain) > 1 and self._folded_chain(chain[1:]) == wanted))
+            if chain and (
+                self._folded_chain(chain) == wanted
+                or (len(chain) > 1 and self._folded_chain(chain[1:]) == wanted)
+                or (len(segments) >= 2 and len(chain) >= len(segments) and self._folded_chain(chain[-len(segments):]) == wanted)
+            )
         ]
         if not matches and len(segments) == 1:
             # A short name alone is accepted when the FILE holds it once. When the file
@@ -1820,8 +1826,18 @@ class Patcher:
     def _resolve_symbol_names(self, file_part: str, segments: List[str]) -> Dict[str, Any]:
         """A symbol named by its printed ancestry: `Classe::Methode`, or its short name."""
         rows = self._symbol_rows(file_part)
-        names = [self._split_parameter_list(segment)[0] for segment in segments]
-        parameters = self._split_parameter_list(segments[-1])[1]
+        # Strip optional leading kind keywords ('variable X', 'function foo', 'class Bar')
+        # copied from read_block outlines or get_project_map.
+        cleaned_segments = [
+            re.sub(
+                r"^(?:class|method|function|variable|property|interface|struct|record|enum|constructor|destructor|operator|namespace|mapping|object|array|field|event)\s+",
+                "",
+                seg.strip(),
+            )
+            for seg in segments
+        ]
+        names = [self._split_parameter_list(segment)[0] for segment in cleaned_segments]
+        parameters = self._split_parameter_list(cleaned_segments[-1])[1]
         chains = self._symbol_chains(rows)
         labels = self._symbol_labels(rows)
         id_chains = self._symbol_id_chains(rows)
@@ -2196,7 +2212,7 @@ class Patcher:
             _abs_path, text, _newline, error = self._resolve_markdown(file_part)
             if error:
                 return []
-            layout = markdown_layout(text)
+            layout = self._get_markdown_layout(_abs_path, text.encode("utf-8"), text)
             if not layout:
                 return []
             labels = self._section_labels(layout)
@@ -3023,10 +3039,15 @@ class Patcher:
                         ),
                         "",
                     )
-                    m_type = re.match(
-                        r"^(?:(?:public|internal|private|protected|static|abstract|sealed|partial|readonly)\s+)*(enum|class|struct|interface|record)\s+(\w+)",
-                        first_meaningful,
-                    )
+                    # `private` and `protected` types CANNOT live at namespace scope in C# (CS1527),
+                    # so a private/protected enum/class/struct is legitimately nested inside the class.
+                    if not re.match(r"^(?:(?:static|abstract|sealed|partial|readonly)\s+)*(?:private|protected)\b", first_meaningful):
+                        m_type = re.match(
+                            r"^(?:(?:public|internal|static|abstract|sealed|partial|readonly)\s+)*(enum|class|struct|interface|record)\s+(\w+)",
+                            first_meaningful,
+                        )
+                    else:
+                        m_type = None
                     if m_type:
                         decl_kind, decl_name = m_type.group(1), m_type.group(2)
                         return {
@@ -3520,6 +3541,10 @@ class Patcher:
                 new_content=applied.text,
                 additions=self._added_fragments(ops, content),
             )
+        if result.get("status") == "error":
+            result.setdefault("content_hash", current_hash)
+            result.setdefault("line_count", len(content.splitlines()))
+            result.setdefault("numbered_text", numbered(content, 1))
 
         # The answer names the path the caller WROTE, never the stored id the resolver
         # produced: that id is an internal coordinate (an overload carries a SHA-1 in it)
@@ -3648,17 +3673,6 @@ class Patcher:
                     "content does not end with a blank line: the blank line that separated what "
                     "follows is GONE (the range is inclusive). Add a trailing blank line to your "
                     "content if you wanted to keep it."
-                )
-                result["warnings"] = warnings
-            dropped = self._heading_range_drops_a_bullet(ops, content)
-            if dropped:
-                number, text = dropped
-                warnings = list(result.get("warnings") or [])
-                warnings.append(
-                    "the replaced range covered line " + str(number) + ", a bullet of the titled "
-                    "item above it ('" + text[:80] + "'), and your content carries no bullet: the "
-                    "bullet is GONE (the range is inclusive). Shrink the range to the title line "
-                    "if you meant to keep it."
                 )
                 result["warnings"] = warnings
         self._remember_stamps(stamps)
@@ -5161,7 +5175,7 @@ class Patcher:
             _abs_path, text, _newline, error = self._resolve_markdown(document_id)
             if error:
                 continue
-            layout = markdown_layout(text)
+            layout = self._get_markdown_layout(_abs_path, text.encode("utf-8"), text)
             if not layout:
                 continue
             identifiers = self._layout_ids(document_id, layout)
@@ -5296,8 +5310,6 @@ class Patcher:
         if self._starts_with_doc_comment(new_code):
             replace_start = self._leading_doc_start(file_bytes, sym.start_byte)
 
-        _isolated_ok, isolated_errs = parser.validate_syntax(new_bytes, sym.file_path)
-
         spliced_bytes = file_bytes[:replace_start] + new_bytes + file_bytes[sym.end_byte :]
         spliced_ok, spliced_errs = parser.validate_syntax(spliced_bytes, sym.file_path)
 
@@ -5310,7 +5322,11 @@ class Patcher:
                 spliced_bytes = raw_spliced
                 rebased_code = new_code
             else:
-                err_objs = spliced_errs or isolated_errs
+                if spliced_errs:
+                    err_objs = spliced_errs
+                else:
+                    _isolated_ok, isolated_errs = parser.validate_syntax(new_bytes, sym.file_path)
+                    err_objs = isolated_errs
                 # Region only when the errors come from the spliced file: the
                 # isolated snippet numbers its own lines.
                 region = self._line_region(spliced_bytes, replace_start, len(new_bytes)) if spliced_errs else None
@@ -5469,6 +5485,16 @@ class Patcher:
                     anchor_id = resolved_anchor
             anchor_sym = self.db.get_symbol(anchor_id)
             if not anchor_sym:
+                # Short-name fallback: try resolving relative to parent_id or file_path
+                for candidate_prefix in ([parent_id, file_path] if parent_id != file_path else [file_path]):
+                    if candidate_prefix:
+                        cand_resolved = self._resolve_displayed_path(f"{candidate_prefix}::{anchor}")
+                        if cand_resolved:
+                            anchor_sym = self.db.get_symbol(cand_resolved)
+                            if anchor_sym:
+                                anchor_id = cand_resolved
+                                break
+            if not anchor_sym:
                 return {
                     "status": "error",
                     "parent_id": parent_id,
@@ -5476,7 +5502,12 @@ class Patcher:
                     "actionable_hint": "Check the anchor address or omit anchor to insert at default position.",
                 }
             if parent_sym:
-                if anchor_sym.parent_id != parent_sym.id:
+                if anchor_sym.id == parent_sym.id:
+                    # `anchor=<parent>` is how the Markdown route asks for "insert FIRST": the
+                    # same word has to mean the same thing on a code parent, where it was refused.
+                    position = "start"
+                    anchor_sym = None
+                elif anchor_sym.parent_id != parent_sym.id:
                     # #44(c): In C#/Python/TS, top-level types inside a namespace often have
                     # parent_id == None in the symbol table while parent_sym is the namespace
                     # in the same file. Allow anchoring on a top-level symbol of the same file
@@ -5521,7 +5552,12 @@ class Patcher:
         indent_step = self.indent_mgr.detect_file_indent_step(file_bytes)
         at_start = position == "start"
 
-        if parent_sym and parent_sym.kind == "class":
+        # EVERY container takes members the same way. The condition used to name `class` alone,
+        # while the post-condition below accepts the full list: on a struct, interface, record or
+        # enum this branch was skipped, the code was appended at `len(file_bytes)` -- OUTSIDE the
+        # type -- and the post-condition then refused the call, so inserting a member into any of
+        # those four types failed 100% of the time (the five kinds are one and the same case).
+        if parent_sym and parent_sym.kind in ("class", "struct", "interface", "record", "enum"):
             # #44(b): Prevent insert_block(parent=Class) from silently nesting a sibling enum/type
             # inside the class when the caller submitted a top-level type declaration (run7 t09).
             first_code_line = next(
@@ -5532,8 +5568,11 @@ class Patcher:
                 ),
                 "",
             )
+            # `private` and `protected` are NOT a namespace-level nest: C# forbids them there
+            # (CS1527), so a `private enum State` / `protected class Node` is legal ONLY inside a
+            # container. Keeping them in the modifier list refused a nesting the compiler demands.
             m_nested_type = re.match(
-                r"^(?:(?:public|internal|private|protected|static|abstract|sealed|partial|readonly)\s+)*(enum)\s+(\w+)",
+                r"^(?:(?:public|internal|static|abstract|sealed|partial|readonly)\s+)*(enum)\s+(\w+)",
                 first_code_line,
             )
             if m_nested_type and anchor_sym is None:
@@ -5639,6 +5678,41 @@ class Patcher:
         spliced_ok, spliced_errs = parser.validate_syntax(spliced_bytes, file_path)
 
         if not spliced_ok:
+            if (parent_sym is None or parent_sym.kind == "namespace") and anchor_sym is None:
+                # In C# / TS, a property or field dropped outside every class can fail Tree-sitter
+                # syntax validation at file scope before reaching the orphan post-condition below.
+                # If the file holds a single type container, try routing into it before refusing.
+                existing_syms = parser.parse_file(file_path, file_bytes).symbols
+                type_container_ids = sorted(
+                    {
+                        s.id
+                        for s in existing_syms
+                        if s.kind in ("class", "struct", "interface", "record", "enum")
+                    }
+                )
+                first_code_line = next(
+                    (
+                        ln.strip()
+                        for ln in code.splitlines()
+                        if ln.strip() and not ln.strip().startswith(("//", "/*", "*", "#"))
+                    ),
+                    "",
+                )
+                is_type_decl = bool(
+                    re.search(r"\b(class|struct|interface|enum|record|namespace|delegate)\s+\w+", first_code_line)
+                )
+                if len(type_container_ids) == 1 and not is_type_decl:
+                    routed = self.insert_symbol(
+                        parent_id=str(type_container_ids[0]), code=code, position=position, anchor=None
+                    )
+                    if routed.get("status") == "success":
+                        routed["routed_to_parent"] = self.displayed_symbol_id(str(type_container_ids[0]))
+                        routed["warnings"] = list(routed.get("warnings") or []) + [
+                            "'" + str(parent_id) + "' is not a container, and this file holds ONE "
+                            "type: member was inserted INSIDE '"
+                            + str(self.displayed_symbol_id(str(type_container_ids[0]))) + "'."
+                        ]
+                        return routed
             return self._syntax_error_payload(
                 "parent_id",
                 parent_id,
@@ -5694,6 +5768,33 @@ class Patcher:
                 if s.id not in before_ids and s.kind in member_kinds.values() and not s.parent_id
             ]
             if orphans:
+                # TYPES only. A namespace is a container in the grammar, but no member can
+                # live DIRECTLY in one: counting it made a file holding a single class look
+                # like it held two containers, and the routing below stayed off exactly in the
+                # ordinary case it exists for.
+                type_container_ids = sorted(
+                    {
+                        s.id
+                        for s in spliced_symbols
+                        if s.kind in ("class", "struct", "interface", "record", "enum")
+                    }
+                )
+                if len(type_container_ids) == 1:
+                    # ONE type in the file: the intent is not ambiguous, and the refusal that
+                    # used to stand here already named the only possible answer -- so route
+                    # instead of spending a turn on it. The recursion enters the container
+                    # branch, where the member lands INSIDE the type and no orphan is left.
+                    routed = self.insert_symbol(
+                        parent_id=str(type_container_ids[0]), code=code, position=position, anchor=None
+                    )
+                    if routed.get("status") == "success":
+                        routed["routed_to_parent"] = self.displayed_symbol_id(str(type_container_ids[0]))
+                        routed["warnings"] = list(routed.get("warnings") or []) + [
+                            "'" + str(parent_id) + "' is not a container, and this file holds ONE "
+                            "type: '" + str(orphans[0].name) + "' was inserted INSIDE '"
+                            + str(self.displayed_symbol_id(str(type_container_ids[0]))) + "'."
+                        ]
+                        return routed
                 listed = ", ".join(sorted(set(containers))[:4]) or "this file holds no container"
                 return {
                     "status": "error",
@@ -5741,6 +5842,10 @@ class Patcher:
             if state is not None:
                 payload["line_count"] = state["line_count"]
                 payload["numbered_text"] = state["numbered_text"]
+                # The stamp belongs WITH the numbering it describes. Without it the caller had to
+                # read the block back before editing what it had just created (measured: the next
+                # edit of a freshly inserted member cost one read_block).
+                payload["content_hash"] = state["content_hash"]
         return payload
 
     def delete_symbol(self, symbol_id: str) -> Dict[str, Any]:
@@ -5860,12 +5965,13 @@ class Patcher:
         repeat '### New Features' under each released version, so a document-wide
         name check would refuse valid edits.
         """
-        normalized = heading.strip().lower()
+        normalized = section_title(heading).strip().lower() or heading.strip().lower()
         scope = self._parent_scope(layout, position, level)
         for j, item in enumerate(layout):
             if exclude_index is not None and item["index"] == exclude_index:
                 continue
-            if int(item["level"]) != int(level) or item["heading"].strip().lower() != normalized:
+            item_title = section_title(str(item["heading"])).strip().lower() or str(item["heading"]).strip().lower()
+            if int(item["level"]) != int(level) or item_title != normalized:
                 continue
             if self._parent_scope(layout, j, level) == scope:
                 return item
@@ -5895,7 +6001,14 @@ class Patcher:
         the expected heading turns a write under a stale name into a clear refusal.
         """
         expected = (expected_heading or "").strip()
-        if not expected or heading.strip().lower() == expected.lower():
+        if not expected:
+            return None
+        clean_expected = re.sub(r"^#{1,6}\s+", "", expected).strip()
+        clean_heading = re.sub(r"^#{1,6}\s+", "", heading.strip()).strip()
+        if (
+            clean_heading.lower() == clean_expected.lower()
+            or Patcher._fold_name(section_title(clean_heading)) == Patcher._fold_name(section_title(clean_expected))
+        ):
             return None
         return {
             "status": "error",
@@ -7523,7 +7636,7 @@ class Patcher:
         relative = self._relative_path(target)
         payload["path"] = relative
         indexer = getattr(self, "indexer", None)
-        if indexer is not None and indexer.should_ignore(target):
+        if indexer is not None and indexer.ignore_pattern_for(relative, include_discovery=False) is not None:
             payload["error"] = (
                 "'" + relative + "' matches an ignore pattern of this workspace, so it would "
                 "exist on disk and stay invisible to every read: nothing was written."
@@ -7642,6 +7755,15 @@ class Patcher:
             resolved_where = self._resolve_displayed_path(where)
             if resolved_where:
                 where = resolved_where
+        elif where and where != parent_id and "#" not in where:
+            # Short-name fallback for anchor: try parent_id::where, then doc_path::where
+            doc_prefix = parent_id.split("::")[0].split("#")[0]
+            for cand_prefix in ([parent_id, doc_prefix] if parent_id != doc_prefix else [doc_prefix]):
+                if cand_prefix:
+                    resolved_where = self._resolve_displayed_path(f"{cand_prefix}::{where}")
+                    if resolved_where:
+                        where = resolved_where
+                        break
         # Resilient interface: an omitted `where` means "first child", exactly like
         # passing the parent's own id. An agent that just wants to prepend should not have
         # to know any magic value.
@@ -7698,7 +7820,7 @@ class Patcher:
         if error:
             error["document_id"] = document_id
             return error
-        layout = markdown_layout(document_text)
+        layout = self._get_markdown_layout(abs_path, document_text.encode("utf-8"), document_text)
 
         # The receiving node, and the span of its direct children.
         parent_index: Optional[int] = None
@@ -8015,7 +8137,7 @@ class Patcher:
         _abs_path, text, _newline, error = self._resolve_markdown(document_id)
         if error:
             return section_id
-        layout = markdown_layout(text)
+        layout = self._get_markdown_layout(_abs_path, text.encode("utf-8"), text)
         identifiers = self._layout_ids(document_id, layout)
         chains = self._section_chains(layout, self._section_labels(layout))
         for index, identifier in enumerate(identifiers):
@@ -8075,7 +8197,7 @@ class Patcher:
         _abs_path, text, _newline, error = self._resolve_markdown(document_id)
         if error:
             return {}
-        layout = markdown_layout(text)
+        layout = self._get_markdown_layout(_abs_path, text.encode("utf-8"), text)
         identifiers = self._layout_ids(document_id, layout)
         chains = self._section_chains(layout, self._section_labels(layout))
         printed: Dict[str, str] = {}
@@ -8173,6 +8295,8 @@ class Patcher:
         out = dict(payload)
         if isinstance(out.get("blocks"), list):
             out["blocks"] = [self.unify_addresses(item) for item in out["blocks"]]
+        if isinstance(out.get("results"), list):
+            out["results"] = [self.unify_addresses(item) for item in out["results"]]
         stored_ids: List[str] = []
         for key in self.ADDRESS_FIELDS:
             value = out.get(key)

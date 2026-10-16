@@ -22,3 +22,11 @@ Les fichiers que Scalpel ne découpe pas en arbre AST (.txt, .ps1, scripts, conf
 - `delete_block` supprime le fichier entier (avec `expected_heading` égal au nom du fichier comme garde-fou).
 - `insert_block` crée un nouveau fichier (parent = dossier existant, text = nom du fichier, content = contenu initial).
 
+## 4. Bilan & Retour d'expérience (Scalpel & AI Agentic OS)
+
+En fin de tâche, sur demande de bilan, ou dès qu'une anomalie est rencontrée, utilise l'outil `scalpel_report` pour consigner un retour d'expérience complet :
+- **Bugs, erreurs et blocages** (`blockages_and_refusals`) avec les éléments exacts de reproduction (`reproduction_data`),
+- **Avis sur l'expérience d'utilisation de l'AI Agentic OS** (`ai_os_experience` / `summary` / `successes` : capsules d'experts, `expert_wakeup`, `expert_push_forward`, `expert_ask`, `expert_ticket`, `expert_board`, `expert_mitosis`, compaction, sous-agents, ergonomie du harnais),
+- **Souhaits d'amélioration et propositions d'évolution** pour Scalpel et l'AI Agentic OS (`recommendations` / `improvement_wishes`).
+
+

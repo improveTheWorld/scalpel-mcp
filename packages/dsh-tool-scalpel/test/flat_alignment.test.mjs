@@ -403,7 +403,7 @@ test('5. Service sandboxPolicy absent, ou resolve qui leve, ou mode inconnu -> r
     })
     await assert.rejects(
       async () => { await fbAbsent.deleteFile({ path: 'f.txt' }, {}, ws) },
-      /Politique de bac Ã  sable indisponible : opÃ©ration refusÃ©e\./
+      /Politique de bac à sable indisponible : opération refusée\./
     )
 
     // Resolve qui lÃ¨ve
@@ -414,7 +414,7 @@ test('5. Service sandboxPolicy absent, ou resolve qui leve, ou mode inconnu -> r
     })
     await assert.rejects(
       async () => { await fbThrow.deleteFile({ path: 'f.txt' }, {}, ws) },
-      /Politique de bac Ã  sable indisponible : opÃ©ration refusÃ©e\./
+      /Politique de bac à sable indisponible : opération refusée\./
     )
 
     // Mode inconnu
@@ -425,7 +425,7 @@ test('5. Service sandboxPolicy absent, ou resolve qui leve, ou mode inconnu -> r
     })
     await assert.rejects(
       async () => { await fbInvalid.deleteFile({ path: 'f.txt' }, {}, ws) },
-      /Politique de bac Ã  sable indisponible : opÃ©ration refusÃ©e\./
+      /Politique de bac à sable indisponible : opération refusée\./
     )
   } finally {
     try { fs.rmSync(ws, { recursive: true, force: true }) } catch {}
@@ -452,7 +452,7 @@ test('6. unindexedFallback: off -> 4 outils refusent ; ask, on, absent -> actifs
           if (op === 'write') await fbOff.write({ path: 'mode_test.txt', content: 'c' }, {}, ws)
           if (op === 'deleteFile') await fbOff.deleteFile({ path: 'mode_test.txt' }, {}, ws)
         },
-        /Repli hors index dÃ©sactivÃ© \(mode 'off'\)\./
+        /Repli hors index désactivé \(mode 'off'\)\./
       )
     }
 
@@ -494,14 +494,14 @@ test('7. Canonicalisation: \\\\?\\, alias local localhost\\c$, PhysicalDrive0, d
       const extendedPath = `\\\\?\\${driveLetter}:${rest}\\indexed_sample.txt`
       await assert.rejects(
         async () => { await fbIndexed.read({ path: extendedPath }, {}, ws) },
-        /indexÃ© par Scalpel/
+        /indexé par Scalpel/
       )
 
       // \\localhost\c$\... d'un fichier indexÃ© -> refusÃ©
       const adminPath = `\\\\localhost\\${driveLetter}$${rest}\\indexed_sample.txt`
       await assert.rejects(
         async () => { await fbIndexed.read({ path: adminPath }, {}, ws) },
-        /indexÃ© par Scalpel/
+        /indexé par Scalpel/
       )
 
       // Alias d'un fichier NON indexÃ© -> traitÃ© normalement
@@ -552,15 +552,15 @@ test('8. Garde d eligibilite: un fichier indexe reste refuse en danger-full-acce
 
     await assert.rejects(
       async () => { await fb.read({ path: 'main.cs' }, {}, ws) },
-      /indexÃ© par Scalpel/
+      /indexé par Scalpel/
     )
     await assert.rejects(
       async () => { await fb.edit({ path: 'main.cs', old_string: 'Main', new_string: 'App' }, {}, ws) },
-      /indexÃ© par Scalpel/
+      /indexé par Scalpel/
     )
     await assert.rejects(
       async () => { await fb.deleteFile({ path: 'main.cs' }, {}, ws) },
-      /indexÃ© par Scalpel/
+      /indexé par Scalpel/
     )
   } finally {
     try { fs.rmSync(ws, { recursive: true, force: true }) } catch {}

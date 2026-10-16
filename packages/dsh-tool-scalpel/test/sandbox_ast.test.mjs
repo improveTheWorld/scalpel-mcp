@@ -386,3 +386,26 @@ test('10. Validation syntaxique des arguments d\'escalade', async () => {
     }
   )
 })
+test('11. insert_block en lot (inserts=[...]) : enforceMutationSandbox vérifie toutes les cibles du lot', async () => {
+  const ws = path.join(os.tmpdir(), 'test-ws-11')
+  const outsideFile = 'C:\\outside_forbidden_dir\\secret.js'
+  const { tools, calls, execFor } = createTestHarness({
+    policy: { mode: 'workspace-write', workspaceRoot: ws }
+  })
+
+  await assert.rejects(
+    async () => {
+      await tools.get('insert_block').execute({
+        inserts: [
+          { parent: path.join(ws, 'src/ok.js::App'), text: 'methodA() {}' },
+          { parent: `${outsideFile}::Secret`, text: 'methodB() {}' }
+        ]
+      }, execFor(ws))
+    },
+    (err) => {
+      assert.ok(err.message.includes('[sandbox: file access denied under workspace-write mode]'))
+      return true
+    }
+  )
+  assert.equal(calls.length, 0, 'callTool ne doit pas être invoqué si une entrée de inserts viole le sandbox')
+})

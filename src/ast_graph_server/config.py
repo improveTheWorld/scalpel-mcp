@@ -77,6 +77,10 @@ class ServerConfig:
             "transcripts/*",
             "benchmarks/results",
             "benchmarks/results/*",
+            "_archive",
+            "_archive/*",
+            ".archive",
+            ".archive/*",
         ]
     )
 

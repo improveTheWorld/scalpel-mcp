@@ -5,6 +5,7 @@ import {
   CONTRACT_SECTION_NAME,
   SCALPEL_CONTRACT_PATH,
   TOOLSET_KEY,
+  buildAgenticOsReportingSection,
   buildContractSection,
   defaultModeForPreset,
   loadContract,
@@ -56,13 +57,17 @@ test('projection: les schemas rejettent un etat ou une vue corrompus', () => {
   assert.throws(() => def.wire.viewSchema.parse({ mode: 'x' }))
 })
 
-test('mode par defaut : preset Scalpel -> scalpel ; explicite l\'emporte', () => {
-  assert.equal(defaultModeForPreset('quorum-ptc-scalpel'), 'scalpel')
-  assert.equal(defaultModeForPreset('cordis-scalpel'), 'scalpel')
-  assert.equal(defaultModeForPreset('ptc'), 'standard')
-  assert.equal(defaultModeForPreset(null), 'standard')
-  assert.equal(resolveMode('standard', 'cordis-scalpel'), 'standard')
-  assert.equal(resolveMode(null, 'cordis-scalpel'), 'scalpel')
+test('mode par defaut : tous les presets survivants (standard, ptc, minimal, cordis) ont scalpel par defaut ; explicite l\'emporte', () => {
+  assert.equal(defaultModeForPreset('standard'), 'scalpel')
+  assert.equal(defaultModeForPreset('ptc'), 'scalpel')
+  assert.equal(defaultModeForPreset('minimal'), 'scalpel')
+  assert.equal(defaultModeForPreset('cordis'), 'scalpel')
+  assert.equal(defaultModeForPreset(null), 'scalpel')
+  assert.equal(resolveMode('standard', 'ptc'), 'standard')
+  assert.equal(resolveMode('standard', 'cordis'), 'standard')
+  assert.equal(resolveMode(null, 'ptc'), 'scalpel')
+  assert.equal(resolveMode(null, 'standard'), 'scalpel')
+  assert.equal(resolveMode(null, 'minimal'), 'scalpel')
   assert.equal(resolveMode('scalpel', 'ptc'), 'scalpel')
 })
 
@@ -134,22 +139,26 @@ test('apply : projection enregistree, section de contrat au niveau des outils pl
   assert.equal(h.sections[0].interpolate, false)
 })
 
-test('section : contrat integral uniquement quand la session est en mode Scalpel', () => {
+test('section : contrat integral + reporting en mode Scalpel ; reporting AI Agentic OS maintenu en mode standard', () => {
   const text = (h, agent) => h.sections[0].text({ agent })
   const full = fs.readFileSync(SCALPEL_CONTRACT_PATH, 'utf8').trim()
+  const reportingSection = buildAgenticOsReportingSection('standard')
 
   let h = harness({ explicit: null, preset: 'ptc' })
-  assert.equal(text(h, h.agent()), '', 'preset standard sans choix : rien')
+  assert.ok(text(h, h.agent()).includes(full), 'preset ptc sans choix explicite : scalpel par defaut -> contrat complet')
+  assert.ok(text(h, h.agent()).includes(reportingSection), 'inclut la section de reporting AI Agentic OS')
   assert.equal(h.sections[0].text({}), '', 'sans agent : rien')
 
-  h = harness({ explicit: 'scalpel', preset: 'ptc' })
-  assert.ok(text(h, h.agent()).includes(full), 'choix explicite /toolset scalpel')
+  h = harness({ explicit: 'scalpel', preset: 'minimal' })
+  assert.ok(text(h, h.agent()).includes(full), 'choix explicite /toolset scalpel sur minimal')
 
-  h = harness({ explicit: null, preset: 'quorum-shell-scalpel' })
-  assert.ok(text(h, h.agent()).includes(full), 'preset Scalpel sans /toolset : defaut')
+  h = harness({ explicit: null, preset: 'standard' })
+  assert.ok(text(h, h.agent()).includes(full), 'preset standard sans /toolset : scalpel par defaut')
 
-  h = harness({ explicit: 'standard', preset: 'cordis-scalpel' })
-  assert.equal(text(h, h.agent()), '', 'bascule explicite vers standard retire le contrat')
+  h = harness({ explicit: 'standard', preset: 'cordis' })
+  const stdText = text(h, h.agent())
+  assert.ok(!stdText.includes('# Mode Scalpel : contrat d\'ingenierie'), 'bascule explicite vers standard retire le contrat strict Scalpel')
+  assert.equal(stdText, reportingSection, 'bascule vers standard conserve la consigne de reporting AI Agentic OS & Scalpel')
 
   h.state.explicit = 'scalpel'
   assert.ok(text(h, h.agent()).includes(full), 'la section suit la projection, sans cache')

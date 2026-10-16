@@ -31,13 +31,14 @@ function loadWorkflow(path = SCALPEL_WORKFLOW_PATH, fsApi = fs) {
 
 /**
  * Mode par defaut d'un preset. Meme regle que client.js (qui ne peut pas importer ce module).
- * @param {string|null|undefined} presetId
+ * Scalpel est desormais actif par defaut sur tous les presets (standard, ptc, minimal, cordis).
+ * @param {string|null|undefined} _presetId
  */
-export function defaultModeForPreset(presetId) {
-  return typeof presetId === 'string' && presetId.includes('scalpel') ? 'scalpel' : 'standard'
+export function defaultModeForPreset(_presetId) {
+  return 'scalpel'
 }
 
-/** Mode effectif : choix explicite journalise, sinon defaut du preset. */
+/** Mode effectif : choix explicite journalise, sinon defaut du preset ('scalpel'). */
 export function resolveMode(explicitMode, presetId) {
   return TOOLSET_MODES.includes(explicitMode) ? explicitMode : defaultModeForPreset(presetId)
 }
@@ -121,6 +122,24 @@ export function loadContract(path = SCALPEL_CONTRACT_PATH, fsApi = fs) {
   }
 }
 
+/**
+ * Section de reporting continu pour Scalpel et l'AI Agentic OS, injectee dans tous les presets
+ * survivants (standard, ptc, minimal, cordis), que le mode soit 'scalpel' ou 'standard'.
+ */
+export function buildAgenticOsReportingSection(_mode = 'scalpel') {
+  return [
+    '# Retour d\'expérience & Bilan continu : Scalpel & AI Agentic OS',
+    'En fin de tâche, sur demande de bilan, ou dès que tu rencontres une anomalie, consigne un bilan consolidé via l\'outil `scalpel_report`.',
+    'Ce retour d\'expérience couvre à la fois :',
+    '1. **L\'outil Scalpel** (lecture/édition AST par blocs, recherche, gestion des hashes, limites de grammaire ou de fichiers).',
+    '2. **L\'expérience globale d\'utilisation de l\'AI Agentic OS** (capsules d\'experts `scalpel-experts`, `expert_wakeup`, descente `expert_push_forward`, délégation `expert_ask` / `expert_ticket`, `expert_board`, `expert_mitosis`, compaction d\'état, sous-agents, jobs détachés, ergonomie générale du harnais).',
+    'Rapporte systématiquement :',
+    '- Ton **avis honnête sur l\'expérience d\'utilisation** (`ai_os_experience` / `summary` / `successes`),',
+    '- Les **erreurs, blocages ou comportements inattendus** rencontrés (`blockages_and_refusals`) avec les éléments de reproduction (`reproduction_data`),',
+    '- Tes **souhaits d\'amélioration et propositions d\'évolution** pour Scalpel et l\'AI Agentic OS (`recommendations` / `improvement_wishes`).'
+  ].join('\n')
+}
+
 /** Section de prompt : le contrat complet, au meme niveau que les contrats des outils plats. */
 export function buildContractSection(contract, workflow = loadWorkflow()) {
   const body = contract.text.trim() !== ''
@@ -143,6 +162,6 @@ export function buildContractSection(contract, workflow = loadWorkflow()) {
       wf
     )
   }
-  lines.push('', body)
+  lines.push('', body, '', buildAgenticOsReportingSection('scalpel'))
   return lines.join('\n')
 }

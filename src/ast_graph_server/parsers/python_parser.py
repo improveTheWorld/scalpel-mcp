@@ -99,16 +99,22 @@ class PythonParser(BaseParser):
             symbols=symbols,
             calls=calls,
         )
-        # Imports region at module level
+        # Imports region at module level (contiguous initial imports only)
         head = []
-        for c in tree.root_node.children:
-            if c.type in ("import_statement", "import_from_statement"):
+        for idx_c, c in enumerate(tree.root_node.children):
+            if c.type in ("import_statement", "import_from_statement", "future_import_statement"):
                 head.append(c)
+            elif c.type == "comment":
+                continue
+            elif idx_c == 0 and c.type == "expression_statement" and all(sub.type == "string" for sub in c.children):
+                # Allow module docstring before imports
+                continue
+            elif head:
+                break
             elif c.type in ("class_definition", "function_definition", "decorated_definition"):
                 break
-            elif c.type == "expression_statement":
-                if any(sub.type == "assignment" for sub in c.children):
-                    break
+            elif c.type == "expression_statement" and any(sub.type == "assignment" for sub in c.children):
+                break
         if head:
             start_byte, end_byte = head[0].start_byte, head[-1].end_byte
             symbols.append(

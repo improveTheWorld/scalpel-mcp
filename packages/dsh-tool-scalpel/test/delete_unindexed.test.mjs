@@ -13,7 +13,7 @@ test('Lot U - apply enregistre 8 outils (retrait de delete_unindexed au profit d
     inject: () => {}
   }
   apply(fakeCtx, {})
-  assert.equal(tools.size, 8, 'Il doit y avoir exactement 8 outils')
+  assert.equal(tools.size, 9, 'Il doit y avoir exactement 9 outils (8 universels + scalpel_report)')
   assert.equal(tools.has('delete_unindexed'), false, 'delete_unindexed ne doit plus etre enregistre')
 })
 

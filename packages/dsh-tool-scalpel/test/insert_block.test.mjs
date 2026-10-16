@@ -91,7 +91,8 @@ test('Lot B - insert_block avec content envoie text + "\\n" + content au moteur 
     }, fakeExec)
 
     assert.equal(capturedCmd, 'insert_block')
-    assert.equal(capturedArgs.text, 'hello.js\nconsole.log("hello");')
+    assert.equal(capturedArgs.text, 'hello.js')
+    assert.equal(capturedArgs.content, 'console.log("hello");')
     assert.equal(capturedArgs.parent, '.')
   } finally {
     fs.rmSync(ws, { recursive: true, force: true })
@@ -116,32 +117,38 @@ test('Lot B - insert_block avec content refuse si parent = fichier ou si text co
     const insertTool = tools.get('insert_block')
     const fakeExec = { agent: { session: { header: { cwd: ws } } } }
 
-    // Parent = fichier
-    await assert.rejects(
-      async () => {
-        await insertTool.execute({
-          parent: 'existing.txt',
-          text: 'child.js',
-          content: 'some code'
-        }, fakeExec)
-      },
-      (err) => {
-        assert.match(err.message, /dossier/i)
-        return true
+    // Parent = document ou symbole : désormais autorisé et transmis nativement au moteur
+    let capturedArgs = null
+    const tools2 = new Map()
+    apply({
+      tools: { register: (t) => tools2.set(t.name, t) },
+      inject: () => {}
+    }, {}, {
+      executeScalpel: async (_w, _cmd, args) => {
+        capturedArgs = args
+        return { status: 'success' }
       }
-    )
+    })
+    const resDoc = await tools2.get('insert_block').execute({
+      parent: 'existing.md',
+      text: 'Section Title',
+      content: 'body with trailing newline\n'
+    }, fakeExec)
+    assert.equal(capturedArgs.parent, 'existing.md')
+    assert.equal(capturedArgs.text, 'Section Title')
+    assert.equal(capturedArgs.content, 'body with trailing newline\n')
 
-    // Text contient un saut de ligne
+    // content non-string -> refusé
     await assert.rejects(
       async () => {
         await insertTool.execute({
           parent: '.',
-          text: 'child.js\nextra',
-          content: 'some code'
+          text: 'child.js',
+          content: 12345
         }, fakeExec)
       },
       (err) => {
-        assert.match(err.message, /saut de ligne/i)
+        assert.match(err.message, /chaîne de caractères/i)
         return true
       }
     )
@@ -156,11 +163,7 @@ test('Lot B - Integration reelle: 1000 octets crees par insert_block(content) et
     const subDir = path.join(ws, 'sub')
     fs.mkdirSync(subDir)
 
-    // Creation d un contenu JS valide d exactement 1000 octets sans saut de ligne final
-    // Ligne 1: 50 caracteres (49 + \n)
-    // 20 lignes de 50 = 1000 octets
-    const line = '// 01234567890123456789012345678901234567890123456\n'
-    // 19 lignes avec \n (19 * 52) + derniere ligne sans \n
+    // Création d'un contenu JS valide d'exactement 1000 octets AVEC saut de ligne final (\n) préservé !
     let content = 'export function demo() {\n'
     while (Buffer.byteLength(content, 'utf-8') < 960) {
       content += '  const val = 123456789;\n'
@@ -169,8 +172,8 @@ test('Lot B - Integration reelle: 1000 octets crees par insert_block(content) et
     if (needed > 0) {
       content += '// ' + 'x'.repeat(needed - 4) + '\n'
     }
-    content += '}'
-    assert.equal(Buffer.byteLength(content, 'utf-8'), 999) // ~1000 octets
+    content += '}\n'
+    assert.equal(Buffer.byteLength(content, 'utf-8'), 1000)
 
     const tools = new Map()
     const fakeCtx = {
@@ -195,7 +198,10 @@ test('Lot B - Integration reelle: 1000 octets crees par insert_block(content) et
     // Relecture via read_block
     const readRes = await runScalpel(ws, 'read_block', { path: 'sub/a.mjs', format: 'json' })
     assert.equal(readRes.status, 'success')
-    assert.equal(readRes.bytes, Buffer.byteLength(content, 'utf-8'))
+    // Vérification physique sur disque : le '\n' final est intégralement préservé
+    const diskBytes = fs.readFileSync(path.join(subDir, 'a.mjs'), 'utf-8')
+    assert.equal(diskBytes, content)
+    assert.ok(diskBytes.endsWith('}\n'))
   } finally {
     fs.rmSync(ws, { recursive: true, force: true })
   }
@@ -224,6 +230,34 @@ test('Lot B - Integration reelle: runner.py supporte ops en chaine JSON stringif
     })
     const editStr = typeof editRes === 'string' ? editRes : (editRes?.numbered_text || JSON.stringify(editRes))
     assert.ok(editStr.includes('console.log("hello")'))
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true })
+  }
+})
+test('Lot B - Integration reelle: runner.py supporte ops, edits, inserts, paths stringifies et pre-indexe inserts', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'scalpel-json-strings-'))
+  try {
+    const fPath = path.join(ws, 'mod.js')
+    fs.writeFileSync(fPath, 'export function greet() {\n  return "hi";\n}\n', 'utf-8')
+
+    // paths stringifié
+    const readPaths = await runScalpel(ws, 'read_block', {
+      paths: JSON.stringify(['mod.js::greet']),
+      format: 'json'
+    })
+    assert.ok(Array.isArray(readPaths.blocks))
+    assert.equal(readPaths.blocks[0].status, 'success')
+
+    // inserts stringifié sur un fichier créé hors Scalpel (teste aussi la pré-indexation de inserts dans candidates)
+    const docPath = path.join(ws, 'guide.md')
+    fs.writeFileSync(docPath, '# Guide\n\nIntro.\n', 'utf-8')
+    const insRes = await runScalpel(ws, 'insert_block', {
+      inserts: JSON.stringify([
+        { parent: 'guide.md::Guide', text: '## SubSection\nContent here.' }
+      ])
+    })
+    assert.equal(insRes.status, 'success')
+    assert.equal(insRes.applied, 1)
   } finally {
     fs.rmSync(ws, { recursive: true, force: true })
   }

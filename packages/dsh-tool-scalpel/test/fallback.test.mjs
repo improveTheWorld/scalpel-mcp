@@ -5,7 +5,7 @@ import fsSync from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { createHash } from 'node:crypto'
-import { createFallback, safeGet } from '../lib/fallback.js'
+import { createFallback, safeGet, hintForText } from '../lib/fallback.js'
 import { apply } from '../lib/index.js'
 
 async function createTestEnv() {
@@ -168,8 +168,10 @@ test('(12) hintFor : ajoute repli_hint seulement pour les 5 signatures et jamais
   for (const sig of UNINDEXED_SIGS) {
     const errorPayload = { status: 'error', id: 'x', error: `Prefix ${sig} suffix` }
     const hinted = fallback.hintFor({ ...errorPayload })
-    assert.ok(hinted.repli_hint, `Doit ajouter repli_hint pour signature: ${sig}`)
-    assert.ok(hinted.repli_hint.includes('read_unindexed / edit_unindexed / write_unindexed'))
+    assert.equal(hinted.repli_hint, undefined, `Ne doit jamais prescrire les outils fantômes *_unindexed pour: ${sig}`)
+    const textHinted = hintForText(JSON.stringify(errorPayload))
+    assert.equal(textHinted.includes('_unindexed'), false, 'hintForText ne doit jamais mentionner *_unindexed')
+    assert.doesNotThrow(() => JSON.parse(textHinted), 'hintForText doit retourner un JSON valide')
   }
 
   const otherErr = { status: 'error', id: 'x', error: 'check the spelling' }
@@ -211,7 +213,7 @@ test('(13) apply : enregistre 8 outils, relit le mode dynamiquement, et FLAT_TOO
   let currentMode = 'on'
   apply(fakeCtx, { unindexedFallback: currentMode })
 
-  assert.equal(registeredTools.size, 8, 'Il doit y avoir exactement 8 outils universels enregistrés')
+  assert.equal(registeredTools.size, 9, 'Il doit y avoir exactement 9 outils enregistrés (8 universels + scalpel_report)')
   assert.ok(registeredTools.has('read_block'))
   assert.ok(registeredTools.has('edit_block'))
   assert.ok(registeredTools.has('insert_block'))
@@ -261,7 +263,7 @@ test('(D4) signature is not UTF-8 text : éligible pour edit/write, hintFor acti
       id: 'bad.txt',
       error: "'bad.txt' is not UTF-8 text: cannot decode as text."
     })
-    assert.ok(hinted.repli_hint, 'hintFor doit ajouter repli_hint pour is not UTF-8 text')
+    assert.equal(hinted.repli_hint, undefined, 'hintFor ne doit plus ajouter repli_hint *_unindexed')
 
     const fPath = path.join(tmpDir, 'binary_file.dat')
     await fs.writeFile(fPath, Buffer.from([0x00, 0x01, 0x02, 0xff]))
@@ -395,7 +397,7 @@ test('(R2) non-régression proxy Cordis : apply ne doit jamais lever sous un pro
   assert.doesNotThrow(() => {
     apply(proxyCtx, {})
   })
-  assert.equal(registeredTools.size, 8, '8 outils doivent être enregistrés sans accès direct')
+  assert.equal(registeredTools.size, 9, '9 outils doivent être enregistrés sans accès direct')
 })
 
 test('(Dette-1) safeGet est exporté par fallback.js et gère les erreurs', () => {
@@ -441,7 +443,7 @@ test('(LotA-F5) "the parser recognised no container" est eligible au repli et re
     id: 'dummy.test.js',
     error: "'dummy.test.js' is indexed, but the parser recognised no container (class, interface, namespace, struct, record or enum) in it, so there is no whole file to read."
   })
-  assert.ok(hinted.repli_hint, 'hintFor doit ajouter repli_hint pour parser recognised no container')
+  assert.equal(hinted.repli_hint, undefined, 'hintFor ne doit plus ajouter repli_hint *_unindexed')
 })
 
 test('(LotA-F7) edit_unindexed avec expected_count : echec si count != expected_count (0 octet ecrit, hash inchange)', async () => {
@@ -492,11 +494,16 @@ test('(LotA-F2) hintFor remplace actionable_hint si "is a FILE, not a block that
     status: 'error',
     id: 'myfile.js',
     error: "'myfile.js' is a FILE, not a block that can take a child.",
-    actionable_hint: "insert_block(parent='myfile.js') creates one."
+    actionable_hint: "Existing hint."
   }
 
   const hinted = fallback.hintFor({ ...payload })
   assert.ok(hinted.actionable_hint, 'actionable_hint doit exister')
-  assert.equal(hinted.actionable_hint.includes('creates one'), false, 'Ne doit plus contenir creates one')
+  assert.equal(hinted.actionable_hint.includes('_unindexed'), false, 'Ne doit jamais contenir *_unindexed')
   assert.ok(hinted.actionable_hint.includes('insert_after'), 'Doit orienter vers insert_after')
+
+  const textHinted = hintForText(JSON.stringify(payload))
+  const parsedTextHinted = JSON.parse(textHinted)
+  assert.equal(parsedTextHinted.actionable_hint.includes('_unindexed'), false)
+  assert.ok(parsedTextHinted.actionable_hint.includes('insert_after'))
 })

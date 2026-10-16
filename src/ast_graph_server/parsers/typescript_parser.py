@@ -95,9 +95,15 @@ class TypeScriptParser(BaseParser):
             symbols=symbols,
             calls=calls,
         )
-        # Top-level import statements grouped as an addressable '::imports' block (like Python & C#)
-        # when the file declares other symbols alongside them.
-        head = [c for c in tree.root_node.children if c.type == "import_statement"]
+        # Top-level contiguous import statements grouped as an addressable '::imports' block
+        head = []
+        for c in tree.root_node.children:
+            if c.type == "import_statement":
+                head.append(c)
+            elif c.type == "comment":
+                continue
+            elif head:
+                break
         if head and symbols:
             start_byte, end_byte = head[0].start_byte, head[-1].end_byte
             symbols.append(
@@ -354,13 +360,21 @@ class TypeScriptParser(BaseParser):
                         calls=calls,
                     )
 
-            elif child.type == "interface_declaration":
+            elif child.type in ("interface_declaration", "type_alias_declaration", "enum_declaration", "internal_module", "module"):
                 name_node = child.child_by_field_name("name")
                 if not name_node:
                     continue
                 name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
                 qualified_name = f"{parent_name}.{name}" if parent_name else name
                 symbol_id = f"{file_path}::{qualified_name}"
+                kind_map = {
+                    "interface_declaration": "interface",
+                    "type_alias_declaration": "interface",
+                    "enum_declaration": "enum",
+                    "internal_module": "namespace",
+                    "module": "namespace",
+                }
+                kind = kind_map.get(child.type, "interface")
 
                 start_byte = child.start_byte
                 end_byte = child.end_byte
@@ -376,7 +390,7 @@ class TypeScriptParser(BaseParser):
                         file_path=file_path,
                         parent_id=parent_id,
                         name=name,
-                        kind="interface",
+                        kind=kind,
                         signature=signature,
                         docstring=docstring,
                         start_byte=start_byte,
@@ -384,6 +398,44 @@ class TypeScriptParser(BaseParser):
                         start_line=start_line,
                         end_line=end_line,
                         content_hash=content_hash,
+                    )
+                )
+                body_node = child.child_by_field_name("body")
+                if body_node and child.type in ("internal_module", "module"):
+                    self._extract_symbols_and_calls(
+                        node=body_node,
+                        content=content,
+                        file_path=file_path,
+                        parent_id=symbol_id,
+                        parent_name=qualified_name,
+                        symbols=symbols,
+                        calls=calls,
+                    )
+            elif child.type in ("public_field_definition", "field_definition") and parent_id is not None:
+                name_node = child.child_by_field_name("name")
+                if not name_node:
+                    continue
+                name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace")
+                qualified_name = f"{parent_name}.{name}" if parent_name else name
+                symbol_id = f"{file_path}::{qualified_name}"
+                start_byte = child.start_byte
+                end_byte = child.end_byte
+                start_line = child.start_point[0] + 1
+                end_line = child.end_point[0] + 1
+                symbols.append(
+                    SymbolInfo(
+                        id=symbol_id,
+                        file_path=file_path,
+                        parent_id=parent_id,
+                        name=name,
+                        kind="property",
+                        signature=self._extract_signature(child, content),
+                        docstring=self._extract_docstring(child, content),
+                        start_byte=start_byte,
+                        end_byte=end_byte,
+                        start_line=start_line,
+                        end_line=end_line,
+                        content_hash=compute_content_hash(content[start_byte:end_byte]),
                     )
                 )
 

@@ -7,8 +7,8 @@ window.__ModuleLoader__.load({
     let rootContext = null;
 
     // Meme regle que defaultModeForPreset (lib/toolset.js), qui ne peut pas etre importe cote navigateur.
-    function defaultModeFor(preset) {
-      return preset ? (String(preset).includes('scalpel') ? 'scalpel' : 'standard') : 'scalpel';
+    function defaultModeFor(_preset) {
+      return 'scalpel';
     }
 
     const LOCK = '\uD83D\uDD12';

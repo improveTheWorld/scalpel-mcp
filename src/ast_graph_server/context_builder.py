@@ -13,6 +13,7 @@ Levels:
 
 from dataclasses import dataclass
 import json
+import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import ServerConfig
@@ -192,9 +193,19 @@ class ContextBuilder:
                 + "\n[... " + str(omitted) + f" chars omitted ({shown_lines}/{total_lines} lines shown): the text is NOT complete, so no hash is given; call read_block for complete block and hash ...]",
                 {},
             )
+        extra_info: Dict[str, Any] = {
+            "content_hash": stamp,
+            "line_count": metrics.get("line_count"),
+        }
+        meta = metrics.get("meta") if isinstance(metrics.get("meta"), dict) else {}
+        s_line = metrics.get("start_line") or meta.get("start_line")
+        e_line = metrics.get("end_line") or meta.get("end_line")
+        if s_line and e_line:
+            extra_info["start_line"] = int(s_line)
+            extra_info["end_line"] = int(e_line)
         return (
             address + "  hash " + stamp + "\n" + numbered,
-            {"content_hash": stamp, "line_count": metrics.get("line_count")},
+            extra_info,
         )
 
     def _printed_ref(self, ref_id: str) -> str:
@@ -309,10 +320,17 @@ class ContextBuilder:
             content = slice_bytes.decode("utf-8", errors="replace")
             metrics = {
                 "kind": "symbol",
-                "meta": {"file_path": symbol.file_path, "symbol_kind": symbol.kind},
+                "meta": {
+                    "file_path": symbol.file_path,
+                    "symbol_kind": symbol.kind,
+                    "start_line": symbol.start_line,
+                    "end_line": symbol.end_line,
+                },
                 "content": content,
                 "content_hash": compute_content_hash(content.encode("utf-8")),
                 "line_count": len(content.splitlines()),
+                "start_line": symbol.start_line,
+                "end_line": symbol.end_line,
                 "numbered_text": numbered(content, 1),
             }
             self._metrics_cache[block_ref] = metrics
@@ -641,6 +659,8 @@ class ContextBuilder:
                         entry = ContextEntry(key[0], key[1], lvl, float(item.get("score", 0.0)), text)
                         entry.content_hash = extra.get("content_hash")
                         entry.line_count = extra.get("line_count")
+                        entry.start_line = extra.get("start_line")
+                        entry.end_line = extra.get("end_line")
                         entries[key] = entry
                         order.append(key)
                         break
@@ -682,6 +702,8 @@ class ContextBuilder:
                         entry.text = text
                         entry.content_hash = extra.get("content_hash")
                         entry.line_count = extra.get("line_count")
+                        entry.start_line = extra.get("start_line")
+                        entry.end_line = extra.get("end_line")
                         break
                     if used + delta <= budget_chars:
                         used += delta
@@ -689,6 +711,8 @@ class ContextBuilder:
                         entry.text = text
                         entry.content_hash = extra.get("content_hash")
                         entry.line_count = extra.get("line_count")
+                        entry.start_line = extra.get("start_line")
+                        entry.end_line = extra.get("end_line")
                         break
         ordered = sorted(entries.values(), key=lambda entry: entry.score, reverse=True)
         printed_refs = self._batch_resolve_printed_refs(ordered)
@@ -706,6 +730,9 @@ class ContextBuilder:
                 # The stamp travels WITH the numbering it describes, and only when the text is whole.
                 item["content_hash"] = entry.content_hash
                 item["line_count"] = entry.line_count
+                if getattr(entry, "start_line", None) and getattr(entry, "end_line", None):
+                    item["start_line"] = entry.start_line
+                    item["end_line"] = entry.end_line
             rendered.append(item)
         entry_block = self._to_text(rendered)
         text_block = (map_text + "\n" + entry_block) if map_text else entry_block
@@ -785,10 +812,14 @@ class ContextBuilder:
                 tag = "[" + label + " L" + level + "]"
                 stamp = entry.get("content_hash")
                 h = (" [h:" + str(stamp)[:8] + "]") if stamp else ""
+                lc = entry.get("line_count")
+                lc_str = f" ({lc} lines)" if lc is not None and stamp else ""
+                s_ln, e_ln = entry.get("start_line"), entry.get("end_line")
+                span_str = f" [file L{s_ln}-{e_ln}]" if s_ln and e_ln and stamp else ""
                 text = entry.get("text", "")
                 if "\n" in text:
                     first_line, _, body = text.partition("\n")
-                    lines.append("  " + tag + " " + (member or file_path) + h)
+                    lines.append("  " + tag + " " + (member or file_path) + h + lc_str + span_str)
                     lines.append(body)
                 else:
                     item_text = text

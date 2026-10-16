@@ -45,6 +45,15 @@ test('applyLineOps - replace, delete, insert_after', () => {
   ]);
   assert.equal(r4.error, null);
   assert.equal(r4.text, 'line 1\nafter 1\nline 2\nline 4\nreplaced 5\n');
+
+  // 5. Plusieurs insert_after à la même position appliqués en ordre FIFO
+  const r5 = applyLineOps(initial, [
+    { insert_after: 2, content: 'first at 2' },
+    { insert_after: 2, content: 'second at 2' },
+    { insert_after: 2, content: 'third at 2' }
+  ]);
+  assert.equal(r5.error, null);
+  assert.equal(r5.text, 'line 1\nline 2\nfirst at 2\nsecond at 2\nthird at 2\nline 3\nline 4\nline 5\n');
 });
 
 test('applyLineOps - rejet des intervalles et opérations invalides', () => {
@@ -63,14 +72,13 @@ test('applyLineOps - rejet des intervalles et opérations invalides', () => {
   assert.match(applyLineOps(initial, [{ insert_after: -1, content: 'x' }]).error, /insert_after must be inside/);
   assert.match(applyLineOps(initial, [{ insert_after: 4, content: 'x' }]).error, /insert_after must be inside/);
 
-  // Deux insert_after à la même position
-  assert.match(
-    applyLineOps(initial, [
-      { insert_after: 2, content: 'a' },
-      { insert_after: 2, content: 'b' }
-    ]).error,
-    /another insert already targets position 2/
-  );
+  // Deux insert_after à la même position -> autorisé en ordre FIFO
+  const fifo = applyLineOps(initial, [
+    { insert_after: 2, content: 'a' },
+    { insert_after: 2, content: 'b' }
+  ]);
+  assert.equal(fifo.error, null);
+  assert.equal(fifo.text, 'line 1\nline 2\na\nb\nline 3\n');
 
   // Deux plages qui se chevauchent
   assert.match(
@@ -97,14 +105,20 @@ test('editFileBlock - détection de conflit de hash (Stale read)', async () => {
   const correctHash = crypto.createHash('sha256').update(Buffer.from(initialContent, 'utf8')).digest('hex').slice(0, 8);
   const staleHash = 'deadbeef';
 
-  // Tentative avec mauvais hash -> doit échouer
+  // Tentative avec mauvais hash -> doit échouer et inclure le numbered_text frais
   await assert.rejects(
     () => editFileBlock({
       absPath: filePath,
       ops: [{ replace: [1, 1], content: 'modified line' }],
       expectedHash: staleHash
     }),
-    /Stale read: the block changed since you read it/
+    (err) => {
+      assert.match(err.message, /Stale read: the block changed since you read it/);
+      assert.match(err.message, /\[file_text\]/);
+      assert.match(err.message, /1 \| first line/);
+      assert.match(err.message, /2 \| second line/);
+      return true;
+    }
   );
 
   // Le fichier ne doit pas avoir bougé
@@ -157,15 +171,20 @@ test('editFileBlock - écriture atomique et préservation des fins de ligne (CRL
   assert.equal(savedLf, 'echo "one"\necho "modified two"\necho "three"\n');
   assert.ok(!savedLf.includes('\r\n'));
 
-  // Test avec UTF-8 BOM
+  // Test avec UTF-8 BOM : le hash est calculé sur le texte UTF-8 sans BOM (parité patcher.py)
   const bomPath = path.join(tmpDir, 'test_bom.txt');
-  const bomContent = '\uFEFFalpha\r\nbeta\r\n';
+  const bomRawNoBom = 'alpha\r\nbeta\r\n';
+  const bomContent = '\uFEFF' + bomRawNoBom;
   await fs.writeFile(bomPath, bomContent, 'utf8');
+  const expectedNoBomHash = crypto.createHash('sha256').update(Buffer.from(bomRawNoBom, 'utf8')).digest('hex').slice(0, 8);
 
-  await editFileBlock({
+  const bomEditRes = await editFileBlock({
     absPath: bomPath,
+    expectedHash: expectedNoBomHash,
     ops: [{ replace: [1, 1], content: 'ALPHA' }]
   });
+  const expectedNewNoBomHash = crypto.createHash('sha256').update(Buffer.from('ALPHA\r\nbeta\r\n', 'utf8')).digest('hex').slice(0, 8);
+  assert.match(bomEditRes, new RegExp(`\\[h:${expectedNewNoBomHash}\\]`));
 
   const savedBom = await fs.readFile(bomPath);
   assert.equal(savedBom[0], 0xEF);

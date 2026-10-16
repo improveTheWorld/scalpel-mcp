@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import { test } from 'node:test'
-import { executeScalpel } from '../lib/bridge.js'
+import { executeScalpel, ensureDaemon } from '../lib/bridge.js'
 
 test('Scalpel bridge exécute search_symbols sur dsh-boost', async () => {
   const res = await executeScalpel('C:\\CodeSource\\dsh-boost', 'search_symbols', { query: 'ChannelStore', limit: 1 })
@@ -15,7 +16,7 @@ test('Scalpel bridge exécute read_block sur Scalpel-mcp', async () => {
 })
 
 test('Scalpel bridge démonisé : 5 appels consécutifs ont une latence chaude < 40 ms par appel', async () => {
-  const ws = 'C:\\CodeSource\\Scalpel-mcp'
+  const ws = path.resolve(import.meta.dirname, '../../..')
   // 1er appel (warm-up du workspace si nécessaire)
   const first = await executeScalpel(ws, 'read_block', { path: 'src/ast_graph_server/config.py' })
   const firstText = typeof first === 'string' ? first : JSON.stringify(first)
@@ -78,4 +79,20 @@ test('Scalpel bridge démonisé : rafraîchissement mtime_cache, batch edits=[..
   const rDeleted = await executeScalpel(ws, 'read_block', { path: 'second.js::gamma' })
   const deletedText = typeof rDeleted === 'string' ? rDeleted : JSON.stringify(rDeleted)
   assert.match(deletedText, /error|not in the index|No symbol/i, 'fichier supprimé doit être purgé de l’index')
+
+  // 5. Auto-reload du démon Python lorsque la signature de code/version change
+  const procBefore = ensureDaemon()
+  assert.ok(procBefore && procBefore.pid, 'démon actif avant changement')
+  const runnerPath = path.resolve(import.meta.dirname, '../lib/runner.py')
+  const origStat = fs.statSync(runnerPath)
+  const bumpedTime = new Date(origStat.mtimeMs + 5000)
+  fs.utimesSync(runnerPath, origStat.atime, bumpedTime)
+  try {
+    await executeScalpel(ws, 'read_block', { path: 'mod.js::alpha' })
+    const procAfter = ensureDaemon()
+    assert.ok(procAfter && procAfter.pid, 'nouveau démon actif après changement')
+    assert.notEqual(procAfter.pid, procBefore.pid, 'ensureDaemon doit redémarrer le démon Python quand le code change')
+  } finally {
+    try { fs.utimesSync(runnerPath, origStat.atime, origStat.mtime) } catch {}
+  }
 })

@@ -28,7 +28,7 @@ function createHarness({ sandboxMode = 'workspace-write', callToolImpl } = {}) {
         return `${args.path} [file_text] [h:${hash}] (${lines.length} lines)\n${numLines}`;
       }
       if (name === 'edit_block') {
-        return { status: 'error', error: `'${args.path}' is a whole code file, not a block inside one.` };
+        return { status: 'error', error: `'${args.path}' is a whole file, not a block inside one.` };
       }
       if (name === 'delete_block') {
         return { status: 'error', error: `'${args.path}' is a whole FILE, not a block inside one, and nothing was touched.` };
@@ -260,5 +260,87 @@ test('7. Intégration réelle Python (sans mock) : read_block et edit_block (uni
     const { closeDaemon } = await import('../lib/bridge.js');
     closeDaemon();
     try { fs.rmSync(ws, { recursive: true, force: true }); } catch {}
+  }
+});
+test('8. Garde anti-corruption S1 : pas de repli vers file_block.js sur path contenant :: ou # ou sur whole code file / no symbol has this identifier', async () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'scalpel-u2-guard-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scalpel-u2-outside-'));
+  try {
+    const codeFile = path.join(ws, 'Foo.cs');
+    fs.writeFileSync(codeFile, 'public class Foo { public void Bar() {} }\n', 'utf8');
+    const outA = path.join(outsideDir, 'outA.txt');
+    const outB = path.join(outsideDir, 'outB.txt');
+    fs.writeFileSync(outA, 'hello A\n', 'utf8');
+    fs.writeFileSync(outB, '\uFEFFhello B\n', 'utf8');
+
+    let fileBlockCalled = false;
+    const tools = new Map();
+    const fakeCtx = {
+      tools: { register: (t) => tools.set(t.name, t) },
+      inject: () => {}
+    };
+
+    apply(fakeCtx, {}, {
+      callTool: async (_w, name, args) => {
+        if (name === 'delete_block' && args.path.includes('::')) {
+          return { status: 'error', error: `'${args.path}': no symbol or markdown section has this identifier.` };
+        }
+        if (name === 'edit_block' && args.path && args.path.includes('::')) {
+          return { status: 'error', error: `'${args.path}': no symbol or markdown section has this identifier.`, candidates: ['Foo.cs::Foo::Bar'] };
+        }
+        if (name === 'edit_block' && args.path === 'Foo.cs') {
+          return { status: 'error', error: `'Foo.cs' is a whole code file, not a block inside one.` };
+        }
+        if (name === 'read_block') {
+          return { status: 'error', error: `path resolves outside the workspace root` };
+        }
+        return { status: 'success' };
+      },
+      fileBlock: {
+        editFileBlock: async () => { fileBlockCalled = true; return '[ok]'; },
+        deleteFileBlock: async () => { fileBlockCalled = true; return '[ok]'; }
+      },
+      getSandboxPolicy: () => ({
+        resolve: () => ({ mode: 'danger-full-access', workspaceRoot: ws })
+      })
+    });
+
+    const exec = { agent: { session: { header: { cwd: ws }, id: 'session-guard' } } };
+
+    // (a) delete_block sur symbole mal orthographié ('Foo.cs::Typo') ne doit JAMAIS appeler deleteFileBlock ni supprimer Foo.cs
+    const delRes = await tools.get('delete_block').execute({ path: 'Foo.cs::Typo', expected_heading: 'Foo.cs' }, exec);
+    assert.equal(fileBlockCalled, false, 'deleteFileBlock ne doit jamais être appelé quand path contient ::');
+    assert.ok(fs.existsSync(codeFile), 'Foo.cs doit toujours exister sur disque');
+    assert.equal(delRes.status, 'error');
+
+    // (b) edit_block sur symbole mal orthographié ('Foo.cs::Typo') préserve les candidates AST sans appeler editFileBlock
+    const editTypoRes = await tools.get('edit_block').execute({
+      path: 'Foo.cs::Typo',
+      expected_hash: '12345678',
+      ops: [{ replace: [1, 1], content: 'x' }]
+    }, exec);
+    assert.equal(fileBlockCalled, false, 'editFileBlock ne doit jamais être appelé quand path contient ::');
+    assert.deepEqual(editTypoRes.candidates, ['Foo.cs::Foo::Bar']);
+
+    // (c) edit_block sur 'whole code file' ne doit pas déclencher editFileBlock
+    const editWholeCodeRes = await tools.get('edit_block').execute({
+      path: 'Foo.cs',
+      expected_hash: '12345678',
+      ops: [{ replace: [1, 1], content: 'x' }]
+    }, exec);
+    assert.equal(fileBlockCalled, false, 'editFileBlock ne doit pas être appelé sur whole code file');
+    assert.equal(editWholeCodeRes.status, 'error');
+
+    // (d) read_block(paths=[...]) hors racine retourne les blocs numérotés et hache sans BOM
+    const readPathsRes = await tools.get('read_block').execute({
+      paths: [outA, outB]
+    }, exec);
+    const expectedHashB = crypto.createHash('sha256').update(Buffer.from('hello B\n', 'utf8')).digest('hex').slice(0, 8);
+    assert.match(readPathsRes, /1 \| hello A/);
+    assert.match(readPathsRes, /1 \| hello B/);
+    assert.match(readPathsRes, new RegExp(`\\[h:${expectedHashB}\\]`));
+  } finally {
+    try { fs.rmSync(ws, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(outsideDir, { recursive: true, force: true }); } catch {}
   }
 });

@@ -46,7 +46,6 @@ export function applyLineOps(text, ops) {
   }
 
   const actions = [];
-  const insertPoints = new Set();
 
   for (let index = 0; index < ops.length; index++) {
     const op = ops[index];
@@ -105,13 +104,7 @@ export function applyLineOps(text, ops) {
             error: `op ${index}: insert_after must be inside 0..${total}.`
           };
         }
-        if (insertPoints.has(position)) {
-          return {
-            text: null,
-            error: `op ${index}: another insert already targets position ${position}.`
-          };
-        }
-        insertPoints.add(position);
+        // Multiple inserts at the same position are permitted and applied in FIFO order.
         actions.push({
           start: position,
           end: position,
@@ -146,9 +139,12 @@ export function applyLineOps(text, ops) {
 
   // Tri bottom-up : ordre décroissant d'indice de départ.
   // Si un insert et un range partagent le même indice start, le range s'applique d'abord.
+  // Plusieurs insert_after à la même position s'appliquent en ordre FIFO (index croissant, donc splice du dernier vers le premier).
   actions.sort((a, b) => {
     if (b.start !== a.start) return b.start - a.start;
-    return (b.isRange ? 1 : 0) - (a.isRange ? 1 : 0);
+    const rDiff = (b.isRange ? 1 : 0) - (a.isRange ? 1 : 0);
+    if (rDiff !== 0) return rDiff;
+    return b.index - a.index;
   });
 
   for (const action of actions) {
@@ -368,7 +364,9 @@ export async function editFileBlock({ absPath, ops, expectedHash, fsApi = fs.pro
     throw err;
   }
 
-  const currentHash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
+  const hasBOM = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF;
+  const rawText = hasBOM ? buf.subarray(3).toString('utf8') : buf.toString('utf8');
+  const currentHash = crypto.createHash('sha256').update(Buffer.from(rawText, 'utf8')).digest('hex').slice(0, 8);
 
   const hashesMatch = (exp, act) => {
     if (!exp || !act) return false;
@@ -380,13 +378,18 @@ export async function editFileBlock({ absPath, ops, expectedHash, fsApi = fs.pro
   };
 
   if (expectedHash && !hashesMatch(expectedHash, currentHash)) {
+    let raw = rawText;
+    if (raw.endsWith('\r\n')) raw = raw.slice(0, -2);
+    else if (raw.endsWith('\n') || raw.endsWith('\r')) raw = raw.slice(0, -1);
+    const lines = raw === '' ? [] : raw.split(/\r?\n/);
+    const width = String(Math.max(1, lines.length)).length;
+    const numbered = lines.map((l, i) => `${String(i + 1).padStart(width, ' ')} | ${l}`).join('\n');
+    const header = `${absPath} [file_text] [h:${currentHash}] (${lines.length} lines)`;
+    const freshNumberedText = `${header}\n${numbered}`;
     throw new Error(
-      `Stale read: the block changed since you read it (expected ${expectedHash}, current ${currentHash}) [h:${currentHash}]`
+      `Stale read: the block changed since you read it (expected ${expectedHash}, current ${currentHash}) [h:${currentHash}]\n${freshNumberedText}`
     );
   }
-
-  const hasBOM = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF;
-  const rawText = hasBOM ? buf.subarray(3).toString('utf8') : buf.toString('utf8');
 
   const { text: newText, error } = applyLineOps(rawText, ops);
   if (error) {
@@ -394,8 +397,7 @@ export async function editFileBlock({ absPath, ops, expectedHash, fsApi = fs.pro
   }
 
   const finalText = hasBOM ? '\uFEFF' + newText : newText;
-  const newHash = crypto.createHash('sha256').update(Buffer.from(finalText, 'utf8')).digest('hex').slice(0, 8);
-
+  const newHash = crypto.createHash('sha256').update(Buffer.from(newText, 'utf8')).digest('hex').slice(0, 8);
   const tmpPath = `${absPath}.${crypto.randomUUID()}.tmp`;
   try {
     await fsApi.writeFile(tmpPath, finalText, 'utf8');
@@ -433,16 +435,24 @@ export async function deleteFileBlock({ absPath, expectedHeading, fsApi = fs.pro
     throw new Error(`Cannot delete directory "${absPath}" with delete_block.`);
   }
 
-  if (expectedHeading !== undefined && expectedHeading !== null && expectedHeading !== '') {
-    const base = path.basename(absPath);
-    const normExpected = path.normalize(expectedHeading).toLowerCase();
-    const normBase = base.toLowerCase();
-    const normAbs = path.normalize(absPath).toLowerCase();
-    if (normExpected !== normBase && !normAbs.endsWith(normExpected)) {
-      throw new Error(
-        `expected_heading guard failed: expected "${expectedHeading}", target is "${base}".`
-      );
-    }
+  // THE GUARD IS MANDATORY. A refusal for a BLOCK address (a path carrying '::' whose
+  // resolution failed) was re-routed here with the bare FILE path, and this function then ran
+  // `unlink` on the whole source file -- the one outcome delete_block promises never to produce.
+  // A caller that really means to delete a whole file names the file it deletes.
+  if (expectedHeading === undefined || expectedHeading === null || expectedHeading === '') {
+    throw new Error(
+      `delete_block on a whole file requires expected_heading="${path.basename(absPath)}": ` +
+        `refusing to delete "${absPath}" without that guard.`
+    )
+  }
+  const base = path.basename(absPath)
+  const normExpected = path.normalize(expectedHeading).toLowerCase()
+  const normBase = base.toLowerCase()
+  const normAbs = path.normalize(absPath).toLowerCase()
+  if (normExpected !== normBase && !normAbs.endsWith(normExpected)) {
+    throw new Error(
+      `expected_heading guard failed: expected "${expectedHeading}", target is "${base}".`
+    )
   }
 
   await fsApi.unlink(absPath);

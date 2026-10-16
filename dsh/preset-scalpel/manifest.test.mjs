@@ -26,3 +26,14 @@ test('les outils fichiers plats sont absents et Scalpel est dans le preset', () 
   assert.match(patch, /C:\\CodeSource\\dsh-boost/)
   assert.match(patch, /failOnStartupError: true/)
 })
+
+test('dsh-tool-scalpel cordis.patch.yml est un tableau YAML top-level (- insert:) sans clé plugins:', () => {
+  const toolPatch = readFileSync(new URL('../../packages/dsh-tool-scalpel/cordis.patch.yml', import.meta.url), 'utf8')
+  const toolManifest = JSON.parse(readFileSync(new URL('../../packages/dsh-tool-scalpel/package.json', import.meta.url), 'utf8'))
+  assert.equal(toolManifest.dsh.bundle.patch, './cordis.patch.yml')
+  assert.match(toolPatch, /^- insert:/m)
+  assert.equal(/^plugins:/m.test(toolPatch), false)
+  assert.equal(toolPatch.includes('id: tool-scalpel'), true)
+  assert.equal(toolPatch.includes("name: '@local/dsh-tool-scalpel'"), true)
+})
+

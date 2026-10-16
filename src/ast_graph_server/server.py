@@ -57,7 +57,7 @@ READ_BLOCK_DESCRIPTION = (
     "own path on the first line, then the children indented under it, and comes back AS TEXT -- its "
     "line breaks are line breaks; JSON returns the object tree. A file NO parser and NO document reader "
     "claims (a .ps1, a .txt, a shell script) returns its WHOLE text, numbered from 1 with its hash, and is "
-    "READ-ONLY. Ask for SEVERAL blocks in ONE call with paths=[...] -- THIS is what makes ONE turn read N blocks, and it is the biggest saving the tool offers: a block you would otherwise read on its OWN turn costs a turn, and a run that reads one block at a time pays for every one of them; if the paths you need are not yet known, name the ones you DO know in the same call instead of one call each: every requested block comes back in "
+    "editable with edit_block. Ask for SEVERAL blocks in ONE call with paths=[...] -- THIS is what makes ONE turn read N blocks, and it is the biggest saving the tool offers: a block you would otherwise read on its OWN turn costs a turn, and a run that reads one block at a time pays for every one of them; if the paths you need are not yet known, name the ones you DO know in the same call instead of one call each: every requested block comes back in "
     "full, with its own numbered text and hash, so N blocks cost one turn instead of N. A WRITE takes a "
     "block, never a listing: a "
     "symbol or a paragraph is one, and so is a document path (its root text); a code file or a directory "
@@ -158,7 +158,14 @@ def empty_symbol_search_note(
         elsewhere = db.search_symbols(query=query, kind=kind, limit=5)
         clause = _file_pattern_clause(db, file_pattern, on_disk)
         if elsewhere:
-            sample = ", ".join(match["symbol_id"] for match in elsewhere[:3])
+            sample = ", ".join(
+                (
+                    patcher.displayed_symbol_id(str(match["symbol_id"]))
+                    if patcher is not None and hasattr(patcher, "displayed_symbol_id") and "#" in str(match["symbol_id"])
+                    else str(match["symbol_id"])
+                )
+                for match in elsewhere[:3]
+            )
             return (
                 "No symbol matches '" + query + "' under file_pattern '" + file_pattern
                 + "': " + clause + ". " + str(len(elsewhere))
@@ -241,6 +248,21 @@ def empty_document_search_note(
             "No paragraph matches '" + query + "' under file_pattern '" + file_pattern
             + "': " + clause + ". Matching is term by term, on headings and bodies; "
             "a code identifier usually lives in code, which search_symbols covers."
+        )
+    syms = db.search_symbols(query=query, limit=5) if query.strip() else []
+    if syms:
+        sym_sample = ", ".join(
+            (
+                patcher.displayed_symbol_id(str(s["symbol_id"]))
+                if patcher is not None and hasattr(patcher, "displayed_symbol_id")
+                else str(s["symbol_id"])
+            )
+            for s in syms[:3]
+        )
+        return (
+            "No paragraph matches '" + query + "'. However, " + str(len(syms))
+            + " code symbol(s) match it: " + sym_sample
+            + ". Call read_block or search_symbols on those symbol addresses."
         )
     return (
         "No paragraph matches '" + query + "'. Matching is term by term, on headings and bodies; "
@@ -597,11 +619,21 @@ class ASTGraphServer:
                 except Exception:
                     pass
             matches = self.db.search_symbols(query=query, kind=kind, file_pattern=path, limit=limit)
+            widened_note = ""
+            if not matches and kind != "all":
+                 fallback_kind = self.db.search_symbols(query=query, kind="all", file_pattern=path, limit=limit)
+                 if fallback_kind:
+                     matches = fallback_kind
+                     widened_note = f"[note: 0 match for kind='{kind}'; auto-widened to kind='all' ({len(matches)} match(es))]"
             # The stored id of an overload carries a sha1 the caller can neither read nor
             # retype: the match is DISPLAYED under its printed path, and keyed internally by
             # the id the views and the errors are built from.
+            addr_by_file: Dict[str, Dict[str, str]] = {}
             for match in matches:
-                match["displayed_id"] = self.patcher.displayed_symbol_id(match["symbol_id"])
+                fpath = str(match.get("file") or str(match["symbol_id"]).split("::", 1)[0])
+                if fpath not in addr_by_file:
+                    addr_by_file[fpath] = self.patcher.symbol_addresses(fpath)
+                match["displayed_id"] = addr_by_file[fpath].get(str(match["symbol_id"])) or self.patcher.displayed_symbol_id(match["symbol_id"])
             views: Dict[str, Any] = {}
             errors: Dict[str, str] = {}
             # A search is not a list the caller chose, so a search never answers a match it
@@ -658,6 +690,8 @@ class ASTGraphServer:
             text = render_symbol_matches(matches, views, errors)
             if note:
                 text = note
+            elif widened_note:
+                text = widened_note + "\n" + text
             if external:
                 text = (text + "\n\n" if text else "") + render_external_matches(external)
 
@@ -727,6 +761,21 @@ class ASTGraphServer:
                             rendered.append(block)
                         elif isinstance(block, dict) and block.get("status") == "error":
                             line = "[error] " + str(block.get("id") or "?") + ": " + str(block.get("error"))
+                            cands = block.get("candidates")
+                            if isinstance(cands, list) and cands:
+                                cand_strs = []
+                                for c in cands[:5]:
+                                    if isinstance(c, dict):
+                                        cp = c.get("path") or c.get("id") or c.get("name") or ""
+                                        cl = c.get("lines")
+                                        if isinstance(cl, list) and len(cl) == 2:
+                                            cand_strs.append(f"{cp} [L{cl[0]}-{cl[1]}]")
+                                        else:
+                                            cand_strs.append(str(cp))
+                                    else:
+                                        cand_strs.append(str(c))
+                                if cand_strs:
+                                    line += "\n  candidates: " + ", ".join(cand_strs)
                             if block.get("actionable_hint"):
                                 line += "\n  hint: " + str(block["actionable_hint"])
                             rendered.append(line)
@@ -774,7 +823,7 @@ class ASTGraphServer:
                 # what this render exists to avoid; the sibling tools that answer
                 # {"format": "text", "text": ...} have been paying that cost all along.
                 return payload["text"]
-            if isinstance(payload, dict) and payload.get("numbered_text"):
+            if effective_format == "json" and isinstance(payload, dict) and payload.get("numbered_text"):
                 payload["referenced_files"] = self._referenced_files(payload["numbered_text"])
             # One grammar on the way out: the caller never sees a stored id. The address the caller
             # USED is passed too, so a heading number in it is answered with its canonical form.
@@ -1190,7 +1239,7 @@ class ASTGraphServer:
             )
             if format == "json":
                 return reply
-            if isinstance(reply, dict) and reply.get("status") == "success":
+            if isinstance(reply, dict) and reply.get("status") in ("success", "noop"):
                 return format_single_edit_result(reply)
             return reply
 
@@ -1245,6 +1294,16 @@ class ASTGraphServer:
                     "or directory to create), rest = body."
                 ),
             ),
+            content: Optional[str] = Field(
+                default=None,
+                description=(
+                    "Body of the new block when its TITLE is sent separately: text is then the "
+                    "title (and, under a directory, the file NAME), and content is the rest. "
+                    "The body is preserved BYTE FOR BYTE, trailing newline included, which the "
+                    "flattened 'text' form loses. Under a code parent the two halves are code "
+                    "and are joined on a newline."
+                ),
+            ),
             inserts: Optional[List[Dict[str, Any]]] = Field(
                 default=None,
                 description=(
@@ -1284,8 +1343,13 @@ class ASTGraphServer:
                     # still refuse cleanly.
                     is_folder = not self._designates_a_code_file(head)
                 if not is_document and not is_folder:
+                    # `content` is the BODY of what is being created: for code the two halves
+                    # are code lines and join on a newline. Nothing strips here, so the byte
+                    # the caller sent last is the byte written (the flattened text= form went
+                    # through _split_block_text, which dropped a trailing newline).
+                    code = one_text if one_content is None else (one_text + "\n" + one_content)
                     return self.patcher.unify_addresses(
-                        self.patcher.insert_symbol(parent_id=one_parent, code=one_text, anchor=one_anchor),
+                        self.patcher.insert_symbol(parent_id=one_parent, code=code, anchor=one_anchor),
                         used=[one_parent, one_anchor],
                     )
                 return self.patcher.unify_addresses(
@@ -1302,6 +1366,12 @@ class ASTGraphServer:
                         "error": "insert_block refused the call: 'inserts' must be a non-empty list of {parent, anchor, text} objects.",
                     }
                 results: List[Dict[str, Any]] = []
+                # ENTRIES TARGETING THE SAME (parent, anchor) MUST CHAIN, not collide: each
+                # one lands at the SAME position, so applying them independently pushed every
+                # new block ABOVE the one before it and the batch was written in REVERSE
+                # order (C, B, A for inserts=[A, B, C]). Entry i is anchored on the block
+                # entry i-1 just created, which is what preserves the caller's order.
+                chained: Dict[tuple, str] = {}
                 for idx, item in enumerate(inserts):
                     if not isinstance(item, dict):
                         return {
@@ -1310,6 +1380,11 @@ class ASTGraphServer:
                         }
                     item_parent = item.get("parent") or parent
                     item_anchor = item.get("anchor") if "anchor" in item else anchor
+                    chain_key = (
+                        str(item_parent) if item_parent else "",
+                        str(item_anchor) if item_anchor is not None else "",
+                    )
+                    effective_anchor = chained.get(chain_key) or item_anchor
                     item_text = item.get("text")
                     item_content = item.get("content") if "content" in item else None
                     if not item_parent or item_text is None:
@@ -1328,11 +1403,25 @@ class ASTGraphServer:
                         }
                     res = _insert_one(
                         str(item_parent),
-                        str(item_anchor) if item_anchor is not None else None,
+                        str(effective_anchor) if effective_anchor is not None else None,
                         str(item_text),
                         str(item_content) if item_content is not None else None,
                     )
                     results.append(res)
+                    created = None
+                    if isinstance(res, dict) and res.get("status") == "success":
+                        created = (
+                            res.get("block_id")
+                            or res.get("created_symbol_id")
+                            or res.get("created_block_id")
+                        )
+                    if created:
+                        chained[chain_key] = str(created)
+                    else:
+                        # Nothing was created where the next entry expected to anchor itself:
+                        # drop the chain so the following entry retries on the caller's anchor
+                        # instead of silently hanging off a block that does not exist.
+                        chained.pop(chain_key, None)
                 applied = sum(1 for r in results if r.get("status") == "success")
                 return {
                     "status": "success" if applied == len(results) else ("partial" if applied > 0 else "error"),
@@ -1348,7 +1437,7 @@ class ASTGraphServer:
                         "or 'inserts=[...]' for a batch of insertions."
                     ),
                 }
-            return _insert_one(parent, anchor, text)
+            return _insert_one(parent, anchor, text, content)
 
         @self.mcp.tool(
             name="delete_block",
@@ -1362,7 +1451,7 @@ class ASTGraphServer:
             ),
         )
         async def delete_block(
-            path: str = Field(..., description="Path of the block to remove."),
+            path: Optional[str] = Field(default=None, description="Path of the block to remove."),
             expected_heading: Optional[str] = Field(
                 default=None,
                 description=(
@@ -1370,13 +1459,24 @@ class ASTGraphServer:
                     "Refuses the deletion when the path has shifted to another paragraph."
                 ),
             ),
+            paths: Optional[List[str]] = Field(
+                default=None,
+                description="Optional list of block paths to remove in a single batch call.",
+            ),
         ) -> Dict[str, Any]:
-            external = self._external_entries(path)
-            if external:
-                return self._external_refusal("delete_block", path, external)
+            if path:
+                external = self._external_entries(path)
+                if external:
+                    return self._external_refusal("delete_block", path, external)
+            if paths:
+                for p in paths:
+                    external = self._external_entries(p)
+                    if external:
+                        return self._external_refusal("delete_block", p, external)
+            used_paths = [p for p in ([path] if path else []) + (list(paths) if paths else []) if p]
             return self.patcher.unify_addresses(
-                self.patcher.delete_block(path=path, expected_heading=expected_heading),
-                used=[path],
+                self.patcher.delete_block(path=path, expected_heading=expected_heading, paths=paths),
+                used=used_paths,
             )
 
         @self.mcp.tool(

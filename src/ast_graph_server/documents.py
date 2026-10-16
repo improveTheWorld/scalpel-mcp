@@ -131,12 +131,14 @@ def heading_lines(lines: List[str]) -> List[Tuple[int, int, str, str]]:
     fence_char = ""
     fence_len = 0
     for number, line in enumerate(lines):
-        marker = _FENCE.match(line.strip())
+        stripped = line.strip()
+        marker = _FENCE.match(stripped)
         if marker:
             fence = marker.group(1)
+            rest = stripped[len(fence):].strip()
             if not fence_char:
                 fence_char, fence_len = fence[0], len(fence)
-            elif fence[0] == fence_char and len(fence) >= fence_len:
+            elif fence[0] == fence_char and len(fence) >= fence_len and not rest:
                 fence_char, fence_len = "", 0
             continue
         if fence_char:
@@ -160,13 +162,15 @@ def unclosed_fence_line(text: str) -> Optional[int]:
     fence_len = 0
     opened_at = 0
     for number, line in enumerate(text.splitlines(), 1):
-        marker = _FENCE.match(line.strip())
+        stripped = line.strip()
+        marker = _FENCE.match(stripped)
         if not marker:
             continue
         fence = marker.group(1)
+        rest = stripped[len(fence):].strip()
         if not fence_char:
             fence_char, fence_len, opened_at = fence[0], len(fence), number
-        elif fence[0] == fence_char and len(fence) >= fence_len:
+        elif fence[0] == fence_char and len(fence) >= fence_len and not rest:
             fence_char, fence_len, opened_at = "", 0, 0
     return opened_at or None
 

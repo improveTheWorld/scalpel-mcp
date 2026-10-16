@@ -33,20 +33,26 @@ export function hintForText(text, options = {}) {
   if (!parsed || typeof parsed !== 'object' || parsed.status !== 'error' || typeof parsed.error !== 'string') {
     return text
   }
-  let extraLines = []
+  const extra = []
   if (parsed.error.includes('is a FILE, not a block that can take a child')) {
-    const hint = isOff
-      ? "insert_block ne crée que l'arbre (fichiers/dossiers) et des paragraphes .md ; pour ajouter du code -> edit_block(path='fichier::symbole', ops=[{insert_after:<dernière ligne>, content}]) (écrit hors du bloc, signalé)."
-      : "insert_block ne crée que l'arbre (fichiers/dossiers) et des paragraphes .md ; pour ajouter du code -> edit_block(path='fichier::symbole', ops=[{insert_after:<dernière ligne>, content}]) (écrit hors du bloc, signalé) ; fichier sans bloc adressable -> write_unindexed/edit_unindexed (la lecture est libre ; les mutations suivent le bac à sable de la session)."
-    extraLines.push('actionable_hint (DSH): ' + hint)
+    extra.push(
+      'The file is not a block: name a block INSIDE it. For code, use ' +
+        "insert_block(parent='<file>::<ClassName>', text=...) or edit_block with insert_after on " +
+        'the last line of an existing symbol; under a DIRECTORY, insert_block(parent=<dir>, ' +
+        'text=<name>) creates the file.'
+    )
   }
-  if (!isOff && UNINDEXED_SIGNATURES.some(sig => parsed.error.includes(sig))) {
-    extraLines.push('repli_hint: Fichier hors couverture Scalpel : read_unindexed / edit_unindexed / write_unindexed / delete_unindexed (la lecture est libre ; les mutations suivent le bac à sable de la session).')
-  }
-  if (extraLines.length > 0) {
-    return text + '\n' + extraLines.join('\n')
-  }
-  return text
+  // NO GHOST TOOL IS EVER NAMED HERE. This block used to prescribe read_unindexed /
+  // edit_unindexed / write_unindexed / delete_unindexed, removed from the surface by Lot U: the
+  // agent followed the hint, called a tool that does not exist, and spent a turn on the harness
+  // refusal. The engine's own actionable_hint already names a route that DOES exist.
+  if (extra.length === 0) return text
+  // The hint travels INSIDE the envelope, in the field the model reads: appending lines after a
+  // JSON object produced a payload that no longer parsed.
+  return JSON.stringify({
+    ...parsed,
+    actionable_hint: [parsed.actionable_hint, ...extra].filter(Boolean).join(' ')
+  })
 }
 import os from 'node:os'
 import {
@@ -696,25 +702,19 @@ export function createFallback({
     }
   }
 
-  function hintFor(res) {
-    const isOff = resolveMode(getMode) === 'off'
-    if (res && typeof res === 'object' && res.status === 'error' && typeof res.error === 'string') {
-      if (res.error.includes('is a FILE, not a block that can take a child')) {
-        res.actionable_hint = isOff
-          ? "insert_block ne crée que l'arbre (fichiers/dossiers) et des paragraphes .md ; pour ajouter du code -> edit_block(path='fichier::symbole', ops=[{insert_after:<dernière ligne>, content}]) (écrit hors du bloc, signalé)."
-          : "insert_block ne crée que l'arbre (fichiers/dossiers) et des paragraphes .md ; pour ajouter du code -> edit_block(path='fichier::symbole', ops=[{insert_after:<dernière ligne>, content}]) (écrit hors du bloc, signalé) ; fichier sans bloc adressable -> write_unindexed/edit_unindexed (la lecture est libre ; les mutations suivent le bac à sable de la session)."
+    function hintFor(res) {
+      if (res && typeof res === 'object' && res.status === 'error' && typeof res.error === 'string') {
+        if (res.error.includes('is a FILE, not a block that can take a child')) {
+          const extra =
+            'The file is not a block: name a block INSIDE it. For code, use ' +
+            "insert_block(parent='<file>::<ClassName>', text=...) or edit_block with insert_after on " +
+            'the last line of an existing symbol; under a DIRECTORY, insert_block(parent=<dir>, ' +
+            'text=<name>) creates the file.'
+          res.actionable_hint = [res.actionable_hint, extra].filter(Boolean).join(' ')
+        }
       }
-    }
-    if (isOff) {
       return res
     }
-    if (res && typeof res === 'object' && res.status === 'error' && typeof res.error === 'string') {
-      if (UNINDEXED_SIGNATURES.some(sig => res.error.includes(sig))) {
-        res.repli_hint = "Fichier hors couverture Scalpel : read_unindexed / edit_unindexed / write_unindexed / delete_unindexed (la lecture est libre ; les mutations suivent le bac à sable de la session)."
-      }
-    }
-    return res
-  }
 
   return {
     read,

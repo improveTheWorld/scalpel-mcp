@@ -86,7 +86,11 @@ test('4. formatMarkdownReport génère un markdown complet avec tables et donné
       'Identification immédiate des symboles avec search_symbols',
       'Édition atomique par ligne'
     ],
-    recommendations: 'Permettre un rafraîchissement automatique du hash lors d\'un stale read sans modification réelle.'
+    ai_os_experience: 'L\'empilement des capsules et expert_push_forward a permis de travailler sans redécouverte.',
+    recommendations: 'Permettre un rafraîchissement automatique du hash lors d\'un stale read sans modification réelle.',
+    improvement_wishes: [
+      'Ajouter une notification visuelle lors de la promotion Delta_LCA'
+    ]
   }
 
   const md = formatMarkdownReport({
@@ -109,6 +113,10 @@ test('4. formatMarkdownReport génère un markdown complet avec tables et donné
   assert.ok(md.includes('Stale read: the block was modified outside.'))
   assert.ok(md.includes('Conflit de hash concurrent'))
   assert.ok(md.includes('Identification immédiate des symboles'))
+  assert.ok(md.includes('### Expérience d\'utilisation de l\'AI Agentic OS'))
+  assert.ok(md.includes('expert_push_forward'))
+  assert.ok(md.includes('### Souhaits d\'amélioration (Scalpel & AI Agentic OS)'))
+  assert.ok(md.includes('promotion Delta_LCA'))
 })
 
 test('5. saveScalpelReport valide les champs obligatoires et écrit .json + .md', () => {

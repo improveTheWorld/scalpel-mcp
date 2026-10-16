@@ -17,7 +17,7 @@ except Exception as e:
     sys.stderr.write(f"Failed to import SCALPEL_SYSTEM_PROMPT: {e}\n")
     sys.exit(1)
 
-start_marker = "This project is pre-indexed by Scalpel."
+start_marker = "This project is pre-indexed by Scalpel"
 step5_marker = "5. BEFORE you finish"
 budget_marker = "Budget:"
 

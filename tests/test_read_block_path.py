@@ -403,23 +403,56 @@ def test_two_declarations_of_one_name_are_ranked_and_the_rank_reads_back(tmp_pat
         read = patcher.read_block(path)
         assert read["status"] == "success", (path, read)
 
-def test_a_member_needs_a_container_and_the_printed_chain_finds_it(tmp_path: Path) -> None:
-    """Two faces of one defect.
+def test_a_member_named_under_a_file_is_routed_or_refused_on_evidence(tmp_path: Path) -> None:
+    """The FILE route and the CONTAINER route, decided on EVIDENCE.
 
-    `insert_symbol("src/ov.cs", code="public void NewMethod() { }")` answered SUCCESS with
-    syntax_ok=True and no id, after writing the method beside the namespace -- code the C#
-    compiler refuses. And `src/ov.cs::N::Over`, the path this surface PRINTS, resolved to
-    nothing in the code route (the lookup was a stored-id lookup), so the insert silently
-    fell back to the FILE and landed outside the type.
+    `insert_symbol("src/ov.cs", code="public void NewMethod() { }")` used to be REFUSED even
+    when the file held exactly ONE type: the answer was not ambiguous, the refusal itself named
+    the only container, and the caller paid a turn for a sentence it already knew. With ONE type
+    the member is now seated INSIDE it; with TWO, the target is genuinely undetermined and the
+    call is still refused -- refusing is what protects against the method-beside-the-namespace
+    code the C# compiler rejects.
+
+    The second face of the defect is unchanged: `src/ov.cs::N::Over`, the path this surface
+    PRINTS, must resolve in the code route instead of silently falling back to the FILE.
     """
     ws, db, patcher = make_env(tmp_path)
 
-    refused = patcher.insert_symbol("src/ov.cs", code="public void NewMethod() { }")
+    types = [
+        row
+        for row in db.get_symbols_for_file("src/ov.cs")
+        if str(row.get("kind")) in ("class", "struct", "interface", "record", "enum")
+    ]
+    assert len(types) == 1, types
+
+    routed = patcher.insert_symbol("src/ov.cs", code="public void NewMethod() { }")
+
+    assert routed["status"] == "success", routed
+    assert routed.get("routed_to_parent"), routed
+    text = (ws / "src" / "ov.cs").read_text(encoding="utf-8")
+    # INSIDE the class, not beside the namespace: four spaces deeper than the declaration.
+    assert "        public void NewMethod()" in text
+
+    # TWO types: nothing says which one was meant, so the refusal stands untouched.
+    # `Over` carries one member on purpose: seating a member at "end of body" needs an existing
+    # child to anchor on, and an EMPTY container is refused by the engine (recorded as a separate
+    # finding: building a type's FIRST member must go through edit_block with a line op).
+    (ws / "src" / "ov.cs").write_text(
+        "namespace N\n{\n    public class Over\n    {\n        public int Existing;\n    }\n\n"
+        "    public class Other\n    {\n    }\n}\n",
+        encoding="utf-8",
+    )
+    # A TEST may write outside the tools; the engine never may. Re-index so the stored spans
+    # describe the bytes now on disk -- otherwise the next insert is computed from a stale span
+    # and refused as "would land outside", which is the guard doing its job, not a defect.
+    patcher.indexer.index_workspace()
+
+    refused = patcher.insert_symbol("src/ov.cs", code="public void Ambiguous() { }")
 
     assert refused["status"] == "error", refused
     assert "MEMBER declaration" in refused["error"]
     assert "src/ov.cs::N::Over" in refused["actionable_hint"]
-    assert "NewMethod" not in (ws / "src" / "ov.cs").read_text(encoding="utf-8")
+    assert "Ambiguous" not in (ws / "src" / "ov.cs").read_text(encoding="utf-8")
 
     seated = patcher.insert_symbol("src/ov.cs::N::Over", code="public void Added() { }")
 

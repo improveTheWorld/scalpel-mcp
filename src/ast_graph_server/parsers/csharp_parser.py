@@ -21,12 +21,21 @@ class CSharpParser(BaseParser):
         "enum_declaration": "enum",
         "interface_declaration": "interface",
     }
+    #: Declaration node types mapped to the symbol kinds stored in the graph.
     MEMBER_KINDS = {
         "method_declaration": "method",
         "constructor_declaration": "constructor",
         "destructor_declaration": "destructor",
         "operator_declaration": "operator",
         "property_declaration": "property",
+        # A FIELD and an EVENT are members like any other: Tree-sitter parses them as
+        # `field_declaration` / `event_field_declaration`, and NOT listing them here made
+        # `_kind_for` answer None, so `_walk` stepped INTO them and every field and constant
+        # of every C# file (`private readonly int _count;`, `public const string Name`,
+        # `static readonly ...`, multi-declarator `int _a, _b;`) was silently dropped --
+        # never listed by read_block, never addressable, never editable.
+        "field_declaration": "field",
+        "event_field_declaration": "event",
         "local_function_statement": "function",
     }
     CONTAINER_KIND_NAMES = frozenset(CONTAINER_KINDS.values())
@@ -153,6 +162,25 @@ class CSharpParser(BaseParser):
 
     def _name_of(self, node: Any, content: bytes) -> Optional[str]:
         name_node = node.child_by_field_name("name")
+        if name_node is None and node.type in ("field_declaration", "event_field_declaration"):
+            # Tree-sitter C# carries a FIELD's name one level deeper than a property's:
+            # field_declaration -> variable_declaration -> variable_declarator -> name.
+            # Stopping at the missing direct 'name' returned None for every field and
+            # constant of every C# file (_options, _count, const/static readonly ...),
+            # so those members were neither listed by read_block nor addressable, and
+            # the multi-declarator form (`private int _a, _b;`) lost both names.
+            for declaration in node.children:
+                if declaration.type != "variable_declaration":
+                    continue
+                for declarator in declaration.children:
+                    if declarator.type != "variable_declarator":
+                        continue
+                    candidate = declarator.child_by_field_name("name")
+                    if candidate is not None:
+                        name_node = candidate
+                        break
+                if name_node is not None:
+                    break
         if name_node is None:
             return None
         name = content[name_node.start_byte : name_node.end_byte].decode("utf-8", errors="replace").strip()

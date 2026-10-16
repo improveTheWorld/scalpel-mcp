@@ -80,6 +80,7 @@ Add to your MCP configuration file:
 - 🏗️ **[Technical Architecture](docs/TECHNICAL_DOCUMENTATION.md)** : AST graph pipelines, SQLite WAL indexing, and lock mechanics.
 - ⏳ **[Delta History & Time-Travel](docs/HISTORIQUE_DELTA.md)** : The 2PC transactional engine, CAS blobs, and rollback algorithms.
 - 🧪 **[Benchmark & Research Lab](benchmarks/)** : The scientific evaluation harness, statistical power analysis, and methodology.
+- 🔄 **[DSH Update Guide](docs/DSH_UPDATE_GUIDE.md)** : Step-by-step runbook to update the Scalpel engine, schemas, workflow, and Python daemon in DeepSeek Harness.
 
 ---
 

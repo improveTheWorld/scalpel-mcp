@@ -78,10 +78,16 @@ export function captureEnvironmentFacts(options = {}) {
   const model = session.header?.model || session.model || options.model || 'unknown'
   const workspace = session.header?.cwd || options.workspace || process.cwd()
 
+  let projectedPreset = null
+  try {
+    projectedPreset = options.projections?.stateOf?.(session, 'agentPreset') ?? null
+  } catch {}
+  const presetId = options.presetId || projectedPreset || session.header?.preset || 'scalpel'
+
   return {
     timestamp: new Date().toISOString(),
     preset_version: presetVersion,
-    preset_id: options.presetId || 'scalpel',
+    preset_id: presetId,
     git_commit: gitCommit,
     git_dirty: gitDirty,
     dsh_version: dshVersion,
@@ -133,6 +139,10 @@ export function formatMarkdownReport(report) {
     `**Résumé :**\n${report.summary || 'Aucun résumé.'}`,
     ''
   ]
+
+  if (report.ai_os_experience) {
+    lines.push('### Expérience d\'utilisation de l\'AI Agentic OS', '', report.ai_os_experience, '')
+  }
 
   if (report.tool_call_counts && Object.keys(report.tool_call_counts).length > 0) {
     lines.push('### Statistiques d\'usage des outils Scalpel', '', '| Outil | Nombre d\'appels |', '| :--- | ---: |')
@@ -200,18 +210,31 @@ export function formatMarkdownReport(report) {
     lines.push('')
   }
 
-  // 6. Recommandations
+  // 6. Recommandations & Souhaits d'amélioration
   lines.push('## 6. Recommandations & Axes d\'amélioration', '')
+  let hasRecs = false
   if (report.recommendations) {
+    hasRecs = true
     if (Array.isArray(report.recommendations)) {
       report.recommendations.forEach(rec => lines.push(`- ${rec}`))
     } else {
       lines.push(report.recommendations)
     }
-  } else {
-    lines.push('*Aucune recommandation formulée.*')
+    lines.push('')
   }
-  lines.push('')
+  if (report.improvement_wishes) {
+    const wishes = Array.isArray(report.improvement_wishes) ? report.improvement_wishes : [report.improvement_wishes]
+    const nonEmptyWishes = wishes.filter(w => typeof w === 'string' && w.trim() !== '')
+    if (nonEmptyWishes.length > 0) {
+      hasRecs = true
+      lines.push('### Souhaits d\'amélioration (Scalpel & AI Agentic OS)', '')
+      nonEmptyWishes.forEach(w => lines.push(`- ${w}`))
+      lines.push('')
+    }
+  }
+  if (!hasRecs) {
+    lines.push('*Aucune recommandation formulée.*', '')
+  }
 
   return lines.join('\n')
 }

@@ -31,6 +31,19 @@ def path_matches(file_path: str, file_pattern: Optional[str]) -> bool:
         return True
     normalized = file_path.replace("\\", "/")
     norm_pattern = str(file_pattern).replace("\\", "/")
+    # A leading './' describes a path RELATIVE to the workspace root, which is how
+    # every stored path is written: keeping it made './src/**/*.cs' match nothing at
+    # all, silently.
+    while norm_pattern.startswith("./"):
+        norm_pattern = norm_pattern[2:]
+    # Support comma-separated patterns or brace expansion '*.{cs,md}'
+    if "{" in norm_pattern and "}" in norm_pattern:
+        m_brace = re.search(r"\{([^{}]+)\}", norm_pattern)
+        if m_brace:
+            pre, post = norm_pattern[: m_brace.start()], norm_pattern[m_brace.end() :]
+            alts = [alt.strip() for alt in m_brace.group(1).split(",") if alt.strip()]
+            if alts:
+                return any(path_matches(file_path, f"{pre}{alt}{post}") for alt in alts)
     if fnmatch.fnmatch(normalized, norm_pattern):
         return True
     if "**/" in norm_pattern:
@@ -42,15 +55,12 @@ def path_matches(file_path: str, file_pattern: Optional[str]) -> bool:
     if normalized.endswith(norm_pattern):
         return True
     prefix = re.split(r"[\*\?\[]", norm_pattern, maxsplit=1)[0].rstrip("/")
-    if prefix and "/" in norm_pattern and "*" not in norm_pattern.split("/")[-1]:
-        return normalized.startswith(prefix + "/")
     if prefix and norm_pattern.endswith(("**", "/*", "/**/*")):
         return normalized.startswith(prefix + "/")
-    # A pattern that names a FOLDER scopes to everything under it: three searches
-    # returned nothing at all because the caller passed a directory where a glob was
-    # expected ("DataLinq.Enterprise/spark"), each costing a manual widening
-    # (declared by the agent on mapab2 a r1 of the base c980d51).
-    return normalized.startswith(norm_pattern.rstrip("/") + "/")
+    # A pattern that names a FOLDER (no wildcard characters) scopes to everything under it.
+    if not any(ch in norm_pattern for ch in "*?["):
+        return normalized.startswith(norm_pattern.rstrip("/") + "/")
+    return False
 
 
 def query_terms(query: str, limit: int = 12) -> List[str]:
@@ -731,6 +741,51 @@ class DatabaseManager:
                 )
                 if len(results) >= limit:
                     break
+
+            if not results and terms:
+                # Fallback: decompose CamelCase / snake_case / dot-separated terms and also match signature
+                sub_terms: List[str] = []
+                for t in terms:
+                    for part in re.findall(r"[A-Za-z0-9]{3,}", re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", t)):
+                        p_low = part.lower()
+                        if p_low not in sub_terms:
+                            sub_terms.append(p_low)
+                if sub_terms:
+                    sub_patterns = ["%" + st + "%" for st in sub_terms[:12]]
+                    sub_where = "(" + " OR ".join("name LIKE ? OR id LIKE ? OR signature LIKE ?" for _ in sub_patterns) + ")"
+                    sub_params: List[Any] = [p for p in sub_patterns for _ in (0, 1, 2)]
+                    if kind and kind != "all":
+                        sub_where += " AND kind = ?"
+                        sub_params.append(kind)
+                    sub_hits = " + ".join(
+                        "CASE WHEN name LIKE ? THEN 3 WHEN id LIKE ? THEN 2 WHEN signature LIKE ? THEN 1 ELSE 0 END"
+                        for _ in sub_patterns
+                    )
+                    sub_params += [p for p in sub_patterns for _ in (0, 1, 2)]
+                    sub_sql = (
+                        "SELECT id, file_path, kind, start_line, signature, name FROM symbols WHERE "
+                        + sub_where + " ORDER BY (" + sub_hits + ") DESC, id ASC"
+                    )
+                    for r in conn.execute(sub_sql, sub_params).fetchall():
+                        fpath = r["file_path"]
+                        if not self._inside_workspace(fpath):
+                            continue
+                        if any(part.startswith("_archive") for part in fpath.replace("\\", "/").split("/")):
+                            if not (file_pattern and "_archive" in str(file_pattern)):
+                                continue
+                        if not path_matches(fpath, file_pattern):
+                            continue
+                        results.append(
+                            {
+                                "symbol_id": r["id"],
+                                "kind": r["kind"],
+                                "file": r["file_path"],
+                                "line": r["start_line"],
+                                "signature": r["signature"],
+                            }
+                        )
+                        if len(results) >= limit:
+                            break
 
             return results
 
