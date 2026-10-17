@@ -357,26 +357,32 @@ Suivi qualité unifié et dédupliqué (campagnes `v0.3.0` → `v0.4.4` + 43 bil
     3. **#60 (P2 — S3, `run3` 3x, `run5` 11x) — Masquage en mode texte du warning cosmétique `entry 0 of edits carried no path, so the top-level path '...' was USED for it`** :
        * Aligner `inherits` sur `#49` en n'émettant ce warning qu'en mode `format == "json"`.
 
-* **Livraison de Scalpel v0.4.6 & Campagne de Validation Forensique v0.4.6 (5 runs : `run1` à `run5` - 17/10/2026)** :
-  * **Correctifs livrés en v0.4.6 (Commit `ca8aee6`, Tag `v0.4.6`, 742/742 tests `pytest` sur `scalpel-mcp`, 117 pass sur `node --test packages/dsh-tool-scalpel`)** :
+* **Livraison de Scalpel v0.4.6 & Campagne de Validation Forensique Consolidée v0.4.6 (10 runs : `run1` à `run10`, n=10 - 17/10/2026)** :
+  * **Correctifs livrés en v0.4.6 (Commit `ca8aee6`, Tag `v0.4.6`, 742/742 tests `pytest` sur `scalpel-mcp`, 121 tests sur `node --test packages/dsh-tool-scalpel` : 117 pass, 0 fail)** :
     * Moteur Python : Détection des noms de `field_declaration` et `event_field_declaration` en C# (`CSharpParser._name_of`) ; extraction des `type_alias_declaration`, `enum_declaration`, `internal_module` et `public_field_definition` en TypeScript/JavaScript ; arrêt strict de `::imports` dès la première déclaration non-import en Python et TS/JS ; règle CommonMark interdisant les info-strings sur les fences fermants dans `documents.py` (`unclosed_fence_line` / `heading_lines`, éliminant le bug #56 `line 1124`) ; support universel de `struct`, `interface`, `record`, `enum` dans `insert_symbol` et retour systématique de `content_hash` ; auto-routage vers le conteneur unique sur `insert_block(parent="fichier.cs", text="<membre>")` ; chaînage FIFO des insertions groupées `inserts=[...]` ; résolution des noms courts et préfixes sur `anchor` (`insert_block` et `insert_symbol`) ; auto-placement et renumérotation des listes ordonnées Markdown (#37 & #52) ; autorisation des types imbriqués `private`/`protected` en C# dans le garde #44 (`CS1527`) ; restitution systématique de `content_hash`, `line_count` et `numbered_text` sur 100 % des refus (y compris `section`, `document`, `file_text`) ; détection de `Coordinate mismatch` (#51) et affichage de `[file Lstart-end]` dans l'en-tête Niveau 3 de `build_context` ; repli déterministe CamelCase / signature dans `DatabaseManager.search_symbols` ; auto-repli sans filtre dans `search_symbols` et `search_documents` ; correction du filtre glob `path_matches` ; exclusion de `_archive/` dans `ServerConfig.discovery_exclude_patterns` ; et exposition de `paths: Optional[List[str]]` sur l'outil MCP `delete_block`.
     * Plugin DSH (`packages/dsh-tool-scalpel`) : Interdiction formelle du repli vers `file_block.js` sur toute cible contenant `::` ou `#` ou sur les erreurs de blocs AST (`isWholeFileOrUnresolvedError`) pour éliminer tout risque de suppression ou faux stale read du fichier parent ; transmission native de `content` à `insert_block` sans perte du `\n` terminal ni blocage hors dossier ; prise en compte de `args.inserts` dans `enforceMutationSandbox` ; support de `paths=[...]` hors racine dans `read_block` ; purge complète des mentions d'outils supprimés `*_unindexed` dans `fallback.js` ; chaînage FIFO des `insert_after` multiples et calcul de hash UTF-8 sans BOM dans `file_block.js` ; désérialisation automatique des arguments JSON stringifiés et purge du message circulaire dans `runner.py` ; mémoïsation TTL 1s de `computePythonCodeSignature()` dans `bridge.js` ; et suppression de la mention `READ-ONLY` pour `.ps1`/`.txt` dans `agent_schemas.json`.
-  * **Résultats mesurés sur les 5 runs de `campaign_v046` (`run1` à `run5`, n=5)** :
-    * **Succès, Compilation, Docs & Double Gate S1** : **5/5 `success=True` (100 % PASS)**, **5/5 `build_ok` (100 %)**, **5/5 `docs_ok` (100 %)**, **5/5 Gate S1 déterministe `PASS (Code S1: 0, Agent S1: 0)` (`peeler.py`)**, et **5/5 verdicts d'audit forensique LLM `PASS` (`0 S1`)** (100 % de conformité qualité).
-    * **Détail par run (n=5)** :
+  * **Résultats mesurés sur les 10 runs de `campaign_v046` (`run1` à `run10`, n=10)** :
+    * **Succès, Compilation, Docs & Double Gate S1** : **10/10 `success=True` (100 % PASS)**, **10/10 `build_ok` (100 %)**, **10/10 `docs_ok` (100 %)**, **10/10 Gate S1 déterministe `PASS (Code S1: 0, Agent S1: 0)` (`peeler.py`)**, et **10/10 verdicts d'audit forensique LLM `PASS` (`0 S1`)** (100 % de conformité qualité sur les 10 runs).
+    * **Détail par run (n=10)** :
       * `run1` : **PASS**, **18 tours** (16 tours assistant), 20 appels, 1 seul refus, 100 % lectures groupées, 37,5 % écritures groupées, **84,9 s**, 1,27M tokens (cache miss 78 899, eff. tokens 134k), audit LLM **PASS (0 S1)**.
       * `run2` : **PASS**, **18 tours** (16 tours assistant), 20 appels, 50,0 % lectures groupées, **57,1 % écritures groupées**, **78,8 s**, 1,25M tokens (cache miss 53 073, eff. tokens 103k), audit LLM **PASS (0 S1)**.
       * `run3` : **PASS**, 25 tours (23 tours assistant), 28 appels, **83,3 % lectures groupées**, 50,0 % écritures groupées, 104,9 s, 1,94M tokens (cache miss 26 204, eff. tokens 100k), audit LLM **PASS (0 S1)**.
       * `run4` : **PASS**, **16 tours** (14 tours assistant — record du banc !), 23 appels, 1 seul refus, 75,0 % lectures groupées, 50,0 % écritures groupées, **74,8 s**, **1,06M tokens** (cache miss 52 611, eff. tokens 101k), audit LLM **PASS (0 S1)**.
       * `run5` : **PASS**, 32 tours (30 tours assistant), 37 appels, 55,6 % lectures groupées, 5,9 % écritures groupées, 118,1 s, 2,67M tokens, audit LLM **PASS (0 S1)**.
-    * **Comparaison des Médianes (`v0.4.6` n=5 vs `v0.4.5` n=5 vs `v0.4.4` n=10)** :
-      * **Tours médians** : **18,0 tours** (**-28,0 % vs v0.4.5** à 25,0 tours ; **-12,2 % vs v0.4.4** à 20,5 tours ; moyenne 21,8 tours vs 27,0).
-      * **Temps agent médian** : **84,9 s** (**-16,3 % vs v0.4.5** à 101,4 s ; **-16,5 % vs v0.4.4** à 101,7 s).
-      * **Tokens totaux médians** : **1 271 110 tokens** (**-35,0 % vs v0.4.5** à 1,96M tok ; **-10,7 % vs v0.4.4** à 1,42M tok).
-      * **Tokens effectifs médians** : **103 567 tokens** (**-28,7 % vs v0.4.5** à 145k tok ; **-8,2 % vs v0.4.4** à 113k tok).
+      * `run6` : **PASS**, 20 tours (18 tours assistant), 22 appels, 80,0 % lectures groupées, 50,0 % écritures groupées, 127,8 s, 1,28M tokens (cache miss 71 496, eff. tokens 127k), audit LLM **PASS (0 S1)**.
+      * `run7` : **PASS**, 29 tours (27 tours assistant), 30 appels, 63,6 % lectures groupées, 27,3 % écritures groupées, 115,7 s, 1,68M tokens (cache miss 43 457, eff. tokens 113k), audit LLM **PASS (0 S1)**.
+      * `run8` : **PASS**, **19 tours** (17 tours assistant), 23 appels, 83,3 % lectures groupées, 50,0 % écritures groupées, 87,3 s, 1,42M tokens (cache miss 45 841, eff. tokens 113k), audit LLM **PASS (0 S1)**.
+      * `run9` : **PASS**, 25 tours (23 tours assistant), 26 appels, 54,5 % lectures groupées, 42,9 % écritures groupées, 84,5 s, 1,91M tokens (cache miss 28 614, eff. tokens 101k), audit LLM **PASS (0 S1)**.
+      * `run10` : **PASS**, **18 tours** (16 tours assistant), 21 appels, **0 refus**, 62,5 % lectures groupées, 50,0 % écritures groupées, **67,2 s**, **1,21M tokens** (cache miss 36 667, eff. tokens 84k), audit LLM **PASS (0 S1)**.
+    * **Comparaison des Médianes Consolidées (`v0.4.6` n=10 vs `v0.4.5` n=5 vs `v0.4.4` n=10)** :
+      * **Tours médians** : **19,5 tours** (17,5 tours assistant) (**-22,0 % vs v0.4.5** à 25,0 tours ; **-4,9 % vs v0.4.4** à 20,5 tours ; moyenne 21,8 tours vs 27,0 en v0.4.5 et 22,3 en v0.4.4).
+      * **Temps agent médian** : **86,1 s** (**-15,1 % vs v0.4.5** à 101,4 s ; **-15,3 % vs v0.4.4** à 101,7 s).
+      * **Tokens totaux médians** : **1 356 870 tokens** (**-30,6 % vs v0.4.5** à 1,96M tok ; **-4,6 % vs v0.4.4** à 1,42M tok).
+      * **Tokens effectifs médians** : **108 284 tokens** (**-25,5 % vs v0.4.5** à 145k tok ; **-4,0 % vs v0.4.4** à 113k tok).
       * **Écritures groupées médianes** : **50,0 %** (**+13,6 pts vs v0.4.5** à 36,4 % ; record absolu sur le banc).
-      * **Lectures groupées médianes** : **75,0 %** (maintien d'un niveau d'adoption très élevé).
-      * **Double Gate S1** : **100 % PASS (0 S1)** maintenu sans discontinuer.
+      * **Lectures groupées médianes** : **69,3 %** (maintien d'un niveau d'adoption élevé).
+      * **Refus médians par run** : **2,5 refus** (**-37,5 % vs v0.4.5** à 4,0 refus).
+      * **Double Gate S1** : **100 % PASS (0 S1)** maintenu sur 10/10 runs.
 
 ## 8. Chantier Efficacité Agent : Réduction de la Friction sur la Lecture et l'Écriture Groupées
 
